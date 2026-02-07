@@ -33,14 +33,8 @@ class User(Base):
     platform_id = Column(String(128), nullable=False, unique=True, index=True)
     username = Column(String(256), nullable=True)
     is_bot = Column(Boolean, nullable=False, default=False)
-
-    # account registeration
     account_created = Column(DateTime(timezone=True), nullable=True)
-
-    #last observed activity (post, like, comment, login, etc.)
     last_active = Column(DateTime(timezone=True), nullable=True)
-
-    # row-level bookkeeping (when we ingested this record)
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -61,32 +55,20 @@ class User(Base):
         cascade="all, delete-orphan",
     )
 
-    @property
-    def is_sleeper(self) -> bool:
-        """True when the account was created long ago but has no recent activity."""
-        if self.account_created is None or self.last_active is None:
-            return False
-        dormant_days = (self.last_active - self.account_created).days
-        idle_days = (datetime.now(timezone.utc) - self.last_active).days
-        return dormant_days > 180 and idle_days > 90
-
     def __repr__(self) -> str:
-        return (
-            f"<User id={self.id} platform_id={self.platform_id!r} "
-            f"is_bot={self.is_bot}>"
-        )
+        return f"<User id={self.id} platform_id={self.platform_id!r} is_bot={self.is_bot}>"
 
 
 #Relationships (edges)
 
-INTERACTION_TYPES = ("follow", "like", "comment")
+RELATION_TYPES = ("follow", "like", "comment")
 
 class Relationship(Base):
     __tablename__ = "relationships"
     __table_args__ = (
         # A user can follow someone AND like their post
         UniqueConstraint(
-            "source_user_id", "target_user_id", "interaction_type",
+            "source_user_id", "target_user_id", "relation_type",
             name="uq_edge_by_type",
         ),
     )
@@ -102,8 +84,8 @@ class Relationship(Base):
     )
 
     # updated — replaces the old `relation_type` freeform string
-    interaction_type = Column(
-        Enum(*INTERACTION_TYPES, name="interaction_type_enum"),
+    relation_type = Column(
+        Enum(*RELATION_TYPES, name="relation_type_enum"),
         nullable=False,
         default="follow",
     )
@@ -123,7 +105,7 @@ class Relationship(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<Relationship {self.source_user_id} -[{self.interaction_type}]-> "
+            f"<Relationship {self.source_user_id} -[{self.relation_type}]-> "
             f"{self.target_user_id}>"
         )
 
