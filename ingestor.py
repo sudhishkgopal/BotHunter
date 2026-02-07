@@ -196,3 +196,129 @@ def create_engagement_pod(session, pod_size: int) -> list[User]:
     log.info("  Pod like edges:   %d", like_edges)
     return bots
 
+
+# Star Bot 
+def create_star_bot(session, humans: list[User], outgoing: int,
+                    incoming: int) -> User:
+    """
+    Create one star-pattern bot: massive outgoing follows, almost no
+    incoming follows. Common follower-farm indentifier.
+    """
+    star = User(
+        platform_id="star_bot_0",
+        username="totally_real_account_123",
+        is_bot=True,
+        created_at=dormant_activity(),
+    )
+    session.add(star)
+    session.flush()
+    log.info("Inserted star bot  (platform_id=%s)", star.platform_id)
+
+    # star -> 5,000 humans (outgoing mass-follow)
+    if outgoing > len(humans):
+        # pad with extra targets so we can hit requested count
+        extra_needed = outgoing - len(humans)
+        extras: list[User] = []
+        for i in range(extra_needed):
+            u = User(
+                platform_id=f"filler_{i}",
+                username=f"filler_user_{i}",
+                is_bot=False,
+                created_at=random_past(30, 730),
+            )
+            extras.append(u)
+        session.add_all(extras)
+        session.flush()
+        log.info("  Created %d filler users to reach %d outgoing follows",
+                 len(extras), outgoing)
+        targets = humans + extras
+    else:
+        targets = random.sample(humans, k=outgoing)
+
+    for t in targets:
+        session.add(Relationship(
+            source_user_id=star.id,
+            target_user_id=t.id,
+            relation_type="follow",
+            created_at=dormant_activity(),
+        ))
+    session.flush()
+    log.info("  Star outgoing follows: %d", len(targets))
+
+    # only a handful of humans follow the star back (select few who get fooled by account)
+    followers = random.sample(humans, k=min(incoming, len(humans)))
+    for f in followers:
+        session.add(Relationship(
+            source_user_id=f.id,
+            target_user_id=star.id,
+            relation_type="follow",
+            created_at=random_past(1, 90),
+        ))
+    session.flush()
+    log.info("  Star incoming follows: %d", len(followers))
+
+    return star
+
+
+# Main ingestion function
+def ingest(human_count: int, group_count: int, pod_size: int,
+           star_outgoing: int, star_incoming: int) -> None:
+    init_db()
+
+    with SessionLocal() as session:
+        log.info("=" * 55)
+        log.info("PHASE 1: Humans")
+        log.info("=" * 55)
+        humans = create_humans(session, human_count, group_count)
+
+        log.info("")
+        log.info("=" * 55)
+        log.info("PHASE 2: Engagement pod")
+        log.info("=" * 55)
+        pod_bots = create_engagement_pod(session, pod_size)
+
+        log.info("")
+        log.info("=" * 55)
+        log.info("PHASE 3: Star bot")
+        log.info("=" * 55)
+        star = create_star_bot(session, humans, star_outgoing, star_incoming)
+
+        session.commit()
+
+        total_users = human_count + len(pod_bots) + 1
+        total_edges = session.query(Relationship).count()
+        log.info("")
+        log.info("-" * 55)
+        log.info("SUMMARY")
+        log.info("  Total users: %d", total_users)
+        log.info("  Total edges: %d", total_edges)
+        log.info("  Human users: %d", human_count)
+        log.info("  Pod bots: %d", len(pod_bots))
+        log.info("  Star bot: 1")
+        log.info("-" * 55)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic social-network data for BotHunter",
+    )
+    parser.add_argument("--humans", type=int, default=300,
+                        help="Number of human users (default: 300)")
+    parser.add_argument("--groups", type=int, default=25,
+                        help="Number of friend-group clusters (default: 25)")
+    parser.add_argument("--pod-size", type=int, default=50,
+                        help="Accounts in the engagement pod (default: 50)")
+    parser.add_argument("--star-follows", type=int, default=5000,
+                        help="Outgoing follows for the star bot (default: 5000)")
+    parser.add_argument("--star-incoming", type=int, default=10,
+                        help="Incoming follows for the star bot (default: 10)")
+    args = parser.parse_args()
+
+    ingest(
+        human_count=args.humans,
+        group_count=args.groups,
+        pod_size=args.pod_size,
+        star_outgoing=args.star_follows,
+        star_incoming=args.star_incoming,
+    )
+
