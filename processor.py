@@ -61,3 +61,47 @@ def build_graph(session) -> tuple[nx.DiGraph, dict[int, User]]:
 
     log.info("Graph loaded: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
     return G, user_map
+
+def compute_features(G: nx.DiGraph) -> dict[int, dict]:
+    """
+    Compute three graph-theoretic features for every node.
+
+    Returns:
+        {node_id: {"k_core": int, "clustering": float, "in_deg": int, "out_deg": int}}
+
+    Notes:
+        Engagement pods form dense connected cluster resulting in high k-core
+        Human users have lower k-core usually
+        Star bots have large degree but low core due to unidirectional connections
+
+        Using undirected k-core. Now, mutual follows become an edge
+      
+        Bots who all know each other might have higher cluster coefficients
+        Popular accounts & star bots have low clustering since their followers don't follow each other
+        
+        In-Degree(followers) / Out-Degree(following)
+
+        Expected stereotypes:
+            Healthy accounts: in =(approx.) out  (roughly balanced)
+            Influencers:      in >> out (many followers, follow few)
+            Star bots:        out >> in (mass-follow, almost no followers)
+            Pod bots:         in =(approx.) out  but both are high AND mutual
+    """
+
+    # K-core on the undirected projection (mutual connections)
+    G_undirected = G.to_undirected()
+    core_numbers = nx.core_number(G_undirected)
+
+    # Clustering on undirected graph 
+    clustering = nx.clustering(G_undirected)
+
+    features: dict[int, dict] = {}
+    for node in G.nodes():
+        features[node] = {
+            "k_core": core_numbers.get(node, 0),
+            "clustering": clustering.get(node, 0.0),
+            "in_deg": G.in_degree(node),
+            "out_deg": G.out_degree(node),
+        }
+
+    return features
