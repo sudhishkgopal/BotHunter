@@ -105,3 +105,111 @@ def compute_features(G: nx.DiGraph) -> dict[int, dict]:
         }
 
     return features
+
+# Risk calculation and classification
+#
+#  The risk score combines multiple weak signals into one strong classifier.
+#  No single metric is sufficient:
+#
+#    - High k-core alone? Could be a tight friend group.
+#    - High out-degree alone? Could be a social butterfly.
+#    - Low clustering alone? Could be a new user.
+#
+#  HIGH out-degree + LOW clustering + LOW in-degree together = strong bot signal.
+
+CLASSIFICATION_BOT = "bot"
+CLASSIFICATION_POD = "engagement_pod"
+CLASSIFICATION_INFLUENCER = "influencer"
+CLASSIFICATION_NORMAL = "normal"
+
+
+def classify_nodes(
+    features: dict[int, dict],
+    k_threshold: int,
+    ) -> dict[int, dict]:
+    """
+    Assign a risk score (0.0 - 1.0) and a label to every node.
+
+    Scoring weights:
+      - Degree asymmetry  (0.40) — out/in ratio; bots skew heavily outward
+      - Clustering inverse (0.35) — low clustering in a high-degree node is suspicious
+      - K-core density    (0.25) — high core number indicates pod membership
+
+    The final label is decided by combining the score with feature context.
+    """
+    if not features:
+        return {}
+
+    # Normalisation bounds to consider outliers
+    max_out = max((f["out_deg"] for f in features.values()), default=1) or 1 
+    max_in = max((f["in_deg"] for f in features.values()), default=1) or 1 
+    max_core = max((f["k_core"] for f in features.values()), default=1) or 1
+
+    results: dict[int, dict] = {}
+
+    for node, f in features.items():
+        in_deg = f["in_deg"]
+        out_deg = f["out_deg"]
+        clust = f["clustering"]
+        k_core = f["k_core"]
+
+        # DEGREE ASYMMETRY 
+        # A balanced account scores ~0.  A star bot (out >> in) scores ~1.
+        # Formula: out_ratio - in_ratio, clamped to [0, 1]
+        out_ratio = out_deg / max_out
+        in_ratio = in_deg / max_in
+        asymmetry = max(0.0, min(1.0, out_ratio - in_ratio + 0.5)) #round up to give buffer for normal accounts
+        
+
+        # CLUSTERING INVERSE
+        # High clustering -> low suspicion. Low clustering -> high suspicion.
+        # BUT only if the node has connections (isolated nodes get 0).
+        if in_deg + out_deg > 0:
+            clust_inv = 1.0 - clust
+        else:
+            clust_inv = 0.0
+
+        # K-CORE DENSITY
+        core_norm = k_core / max_core
+
+        # RISK SCORE
+        W_ASYMMETRY = 0.40
+        W_CLUSTERING = 0.35
+        W_KCORE = 0.25
+
+        risk = (
+            W_ASYMMETRY * asymmetry
+            + W_CLUSTERING * clust_inv
+            + W_KCORE * core_norm
+        )
+
+        # ASSIGN LABEL
+        # Scores consider suspicion level
+        # The feature context determines the type of suspect.
+
+        if k_core >= k_threshold and clust > 0.6:
+            # Dense mutual cluster + high clustering = engagement pod
+            label = CLASSIFICATION_POD
+        elif out_deg > in_deg * 5 and clust < 0.2:
+            # Massive outgoing, almost no incoming, no clustering = star bot
+            label = CLASSIFICATION_BOT
+        elif risk > 0.7 and clust < 0.3:
+            # High risk + low clustering = likely bot (catches edge cases)
+            label = CLASSIFICATION_BOT
+        elif in_deg > out_deg * 3 and clust < 0.3:
+            # High in-degree, low clustering = celebrity / influencer
+            label = CLASSIFICATION_INFLUENCER
+        elif in_deg > out_deg * 3 and clust >= 0.3:
+            # High in-degree WITH high clustering = authority in a community
+            label = CLASSIFICATION_INFLUENCER
+        else:
+            label = CLASSIFICATION_NORMAL
+
+        results[node] = {
+            "risk_score": round(risk, 4),
+            "label": label,
+            **f,  # include raw features for transparency
+        }
+
+    return results
+
