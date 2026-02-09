@@ -196,10 +196,10 @@ def classify_nodes(
         elif risk > 0.7 and clust < 0.3:
             # High risk + low clustering = likely bot (catches edge cases)
             label = CLASSIFICATION_BOT
-        elif in_deg > out_deg * 3 and clust < 0.3:
+        elif in_deg > out_deg * 3 and in_deg >= 50 and clust < 0.3:
             # High in-degree, low clustering = celebrity / influencer
             label = CLASSIFICATION_INFLUENCER
-        elif in_deg > out_deg * 3 and clust >= 0.3:
+        elif in_deg > out_deg * 3 and in_deg >= 50 and clust >= 0.3:
             # High in-degree WITH high clustering = authority in a community
             label = CLASSIFICATION_INFLUENCER
         else:
@@ -295,3 +295,44 @@ def save_results(
     session.commit()
     log.info("Results saved to analysis_results (id=%d)", record.id)
 
+# Main processing function
+def process(k_threshold: int, run_label: str | None) -> None:
+    init_db()
+
+    with SessionLocal() as session:
+        # Step 1 — Load graph from DB
+        G, user_map = build_graph(session)
+
+        if G.number_of_nodes() == 0:
+            log.warning("Database is empty. Run ingestor.py first.")
+            return
+
+        # Step 2 — Compute node features
+        log.info("Computing features...")
+        features = compute_features(G)
+
+        # Step 3 — Classify
+        log.info("Classifying nodes (k_threshold=%d)...", k_threshold)
+        results = classify_nodes(features, k_threshold)
+
+        # Step 4 — Report & persist
+        print_report(results, user_map)
+        save_results(
+            session,
+            results,
+            total_nodes=G.number_of_nodes(),
+            total_edges=G.number_of_edges(),
+            k_threshold=k_threshold,
+            run_label=run_label,
+        )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="BotHunter multi-feature detection engine")
+    parser.add_argument("--k-threshold", type=int, default=10,
+                        help="K-core threshold for pod detection (default: 10)")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Optional label for this analysis run")
+    args = parser.parse_args()
+
+    process(k_threshold=args.k_threshold, run_label=args.label)
