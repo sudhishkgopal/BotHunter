@@ -213,3 +213,85 @@ def classify_nodes(
 
     return results
 
+
+#Reporting and persistence
+def print_report(results: dict[int, dict], user_map: dict[int, dict]) -> None:
+    """Log a readable summary of the detection results."""
+
+    # Count by label
+    counts: dict[str, int] = {}
+    for r in results.values():
+        counts[r["label"]] = counts.get(r["label"], 0) + 1
+
+    log.info("")
+    log.info("=" * 60) # visual separator
+    log.info("DETECTION RESULTS")
+    log.info("=" * 60) # visual separator
+    for label, count in sorted(counts.items()): # sort by label alphabetically
+        log.info("  %-20s %d nodes", label, count) 
+    log.info("-" * 60) # visual separator
+
+    # Top 20 highest-risk nodes
+    ranked = sorted(results.items(), key=lambda x: x[1]["risk_score"], reverse=True) 
+    log.info("")
+    log.info("TOP 20 HIGHEST-RISK NODES:")
+    log.info("%-8s %-22s %-7s %-6s %-6s %-6s %-8s %s",
+             "NodeID", "PlatformID", "Risk", "K", "Clust", "Out", "In", "Label")
+    log.info("-" * 80) # visual separator
+    for node_id, r in ranked[:20]:
+        pid = user_map.get(node_id, {}).get("platform_id", "?") 
+        log.info( 
+            "%-8d %-22s %-7.4f %-6d %-6.3f %-6d %-8d %s", 
+            node_id, pid, r["risk_score"], r["k_core"],
+            r["clustering"], r["out_deg"], r["in_deg"], r["label"], 
+        )
+
+
+def save_results(
+    session,
+    results: dict[int, dict],
+    total_nodes: int,
+    total_edges: int,
+    k_threshold: int,
+    run_label: str | None,
+) -> None:
+    """Persist the detection run to analysis_results."""
+
+    bot_ids = [
+        node_id for node_id, r in results.items()
+        if r["label"] in (CLASSIFICATION_BOT, CLASSIFICATION_POD)
+    ]
+
+    # Ground-truth accuracy (only meaningful with synthetic data where
+    # is_bot is known). In production this field would be NULL.
+    from models import User as UserModel
+    known_bots = {
+        u.id for u in session.query(UserModel).filter(UserModel.is_bot.is_(True)).all()
+    }
+    if known_bots: 
+        detected_set = set(bot_ids)
+        true_pos = len(detected_set & known_bots)
+        precision = true_pos / len(detected_set) if detected_set else 0.0
+        recall = true_pos / len(known_bots) if known_bots else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        accuracy = f1
+        log.info("")
+        log.info("ACCURACY (vs ground truth is_bot flags):")
+        log.info("  Precision: %.2f  Recall: %.2f  F1: %.2f", precision, recall, f1)
+    else:
+        accuracy = None
+
+    record = AnalysisResult(
+        run_label=run_label,
+        k_core_threshold=k_threshold,
+        total_nodes=total_nodes,
+        total_edges=total_edges,
+        bots_detected=len(bot_ids),
+        bot_ids_json=json.dumps(bot_ids),
+        detection_accuracy=accuracy,
+        ran_at=datetime.now(timezone.utc),
+    )
+    session.add(record)
+    session.commit()
+    log.info("Results saved to analysis_results (id=%d)", record.id)
+
