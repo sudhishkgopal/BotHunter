@@ -20,10 +20,12 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY models.py database.py processor.py cli.py main.py ./
+COPY models.py database.py ingestor.py processor.py cli.py main.py ./
 
 VOLUME ["/app/data"]
 ENV DATABASE_URL="sqlite:///data/bothunter.db"
+
+RUN mkdir -p /app/data && chown hunter:hunter /app/data
 
 USER hunter
 

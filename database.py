@@ -17,7 +17,10 @@ from sqlalchemy.orm import sessionmaker
 
 from models import Base
 
-DATABASE_URL = "sqlite:///bothunter.db"
+import os
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///bothunter.db")
+
+
 
 engine = create_engine(
     DATABASE_URL,
