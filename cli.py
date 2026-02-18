@@ -1,10 +1,5 @@
 """
 BotHunter CLI — professional audit interface.
-
-Usage:
-    python cli.py audit
-    python cli.py audit --threshold 20
-    python cli.py audit --threshold 8 --label "nightly scan"
 """
 
 import json
@@ -15,10 +10,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-import networkx as nx
 
 from database import SessionLocal, init_db
 from models import AnalysisResult, Relationship, User
+from processor import build_graph, compute_features, classify_nodes
 
 app = typer.Typer(
     name="bothunter",
