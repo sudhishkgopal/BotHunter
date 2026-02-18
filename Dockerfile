@@ -9,6 +9,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+#Start final image
 FROM python:3.11-slim AS runtime
 
 RUN groupadd --gid 1000 hunter && \
