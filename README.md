@@ -10,38 +10,38 @@ BotHunter implements a Pregel-style distributed engine using a Master-Worker pat
 
 ## Tech Stack
 
-| Layer | Tool |
-|---|---|
-| Language | Python 3.12 |
-| Graph Analysis | NetworkX |
+| Layer                 | Tool                            |
+| --------------------- | ------------------------------- |
+| Language              | Python 3.12                     |
+| Graph Analysis        | NetworkX                        |
 | Distributed Computing | Multiprocessing (Master-Worker) |
-| Database | SQLAlchemy + SQLite |
-| API | FastAPI |
-| CLI | Typer + Rich |
-| Dashboard | Streamlit, Plotly, Pyvis |
-| Visualization | Matplotlib, Pyvis |
+| Database              | SQLAlchemy + SQLite             |
+| API                   | FastAPI                         |
+| CLI                   | Typer + Rich                    |
+| Dashboard             | Streamlit, Plotly, Pyvis        |
+| Visualization         | Matplotlib, Pyvis               |
 
 ## How It Works
 
 ### K-Core Decomposition
 
-The engine uses recursive pruning to isolate subgraphs where every node maintains at least *k* mutual connections:
+The engine uses recursive pruning to isolate subgraphs where every node maintains at least _k_ mutual connections:
 
-1. **Scan** — Identify all nodes with degree less than *k*.
-2. **Prune** — Remove those nodes. This reduces the degree of their neighbours, potentially dropping them below *k* as well.
-3. **Repeat** — Continue until no more nodes can be removed. The surviving subgraph is the *k*-core — a dense cluster where every member has at least *k* connections to other members.
+1. **Scan** — Identify all nodes with degree less than _k_.
+2. **Prune** — Remove those nodes. This reduces the degree of their neighbours, potentially dropping them below _k_ as well.
+3. **Repeat** — Continue until no more nodes can be removed. The surviving subgraph is the _k_-core — a dense cluster where every member has at least _k_ connections to other members.
 
 In bot farm networks, legitimate users get pruned away in early rounds. The remaining core contains the tightly interconnected bot clique.
 
 ### Multi-Feature Risk Scoring
 
-K-Core alone produces false positives. A tight friend group of 15 people can hit *k*=10. The detection engine layers three signals with weighted scoring:
+K-Core alone produces false positives. A tight friend group of 15 people can hit _k_=10. The detection engine layers three signals with weighted scoring:
 
-| Signal | Weight | What It Catches |
-|---|---|---|
-| **Degree Asymmetry** | 0.40 | Star bots (5,000 outgoing follows, 10 incoming) |
-| **Clustering Coefficient Inverse** | 0.35 | Accounts whose followers don't know each other |
-| **K-Core Density** | 0.25 | Engagement groups operating as mutual-follow cliques |
+| Signal                             | Weight | What It Catches                                      |
+| ---------------------------------- | ------ | ---------------------------------------------------- |
+| **Degree Asymmetry**               | 0.40   | Star bots (5,000 outgoing follows, 10 incoming)      |
+| **Clustering Coefficient Inverse** | 0.35   | Accounts whose followers don't know each other       |
+| **K-Core Density**                 | 0.25   | Engagement groups operating as mutual-follow cliques |
 
 ### The Celebrity Problem
 
@@ -66,9 +66,8 @@ python -m streamlit run app.py
 
 ## Credits
 
-| Resource | Source |
-|---|---|
-| **Twitter Social Graph Dataset** | [Stanford SNAP](http://snap.stanford.edu/data/twitter_combined.txt.gz) — 81,306 nodes, 1,768,149 edges |
-| **Citation** | Jure Leskovec & Andrej Krevl. *SNAP Datasets: Stanford Large Network Dataset Collection.* Stanford University, 2014 |
-| **K-Core Decomposition** | Seidman, S.B. (1983). *Network structure and minimum degree.* Social Networks, 5(3), 269-287 |
-
+| Resource                         | Source                                                                                                              |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Twitter Social Graph Dataset** | [Stanford SNAP](https://snap.stanford.edu/data/ego-Twitter.html) — 81,306 nodes, 1,768,149 edges                    |
+| **Citation**                     | Jure Leskovec & Andrej Krevl. _SNAP Datasets: Stanford Large Network Dataset Collection._ Stanford University, 2014 |
+| **K-Core Decomposition**         | Seidman, S.B. (1983). _Network structure and minimum degree._ Social Networks, 5(3), 269-287                        |
