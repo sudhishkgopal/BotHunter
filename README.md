@@ -8,8 +8,6 @@ Social media platforms are routinely manipulated by bot cliques — accounts tha
 
 BotHunter implements a Pregel-style distributed engine using a Master-Worker pattern to decompose social graphs at scale. The master partitions the graph and dispatches subgraph chunks to worker processes, which independently prune low-degree nodes and report results back for global aggregation. This approach parallelizes the most expensive operation (neighbour-degree computation) and scales linearly with available cores.
 
-Validated against the Stanford SNAP Twitter dataset (Leskovec & Krevl, 2014) — **81,306 nodes** and **1,768,149 edges** of real follower relationships.
-
 ## Tech Stack
 
 | Layer | Tool |
@@ -64,3 +62,13 @@ pip install -r requirements.txt
 python database.py
 python ingestor.py
 python -m streamlit run app.py
+```
+
+## Credits
+
+| Resource | Source |
+|---|---|
+| **Twitter Social Graph Dataset** | [Stanford SNAP](http://snap.stanford.edu/data/twitter_combined.txt.gz) — 81,306 nodes, 1,768,149 edges |
+| **Citation** | Jure Leskovec & Andrej Krevl. *SNAP Datasets: Stanford Large Network Dataset Collection.* Stanford University, 2014 |
+| **K-Core Decomposition** | Seidman, S.B. (1983). *Network structure and minimum degree.* Social Networks, 5(3), 269-287 |
+
