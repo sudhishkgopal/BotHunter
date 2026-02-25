@@ -1,0 +1,8 @@
+{
+    "k_core_threshold": 20,
+    "database_path": "bothunter.db",
+    "snap_dataset_url": "https://snap.stanford.edu/data/twitter_combined.txt.gz",
+    "max_neighbors_viz": 50,
+    "top_n_startup": 100,
+    "cache_ttl_seconds": 300
+}
