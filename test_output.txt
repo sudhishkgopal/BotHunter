@@ -1,0 +1,62 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.1, pytest-9.0.2, pluggy-1.6.0 -- C:\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\sudhi\Documents\Coding Projects\BotHunter\BotHunter
+configfile: pyproject.toml
+plugins: anyio-4.12.0, asyncio-1.3.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 29 items
+
+tests/test_api.py::TestHealthEndpoint::test_health_returns_200 PASSED    [  3%]
+tests/test_api.py::TestHealthEndpoint::test_health_has_status_field PASSED [  6%]
+tests/test_api.py::TestHealthEndpoint::test_health_has_version PASSED    [ 10%]
+tests/test_api.py::TestRootEndpoint::test_root_returns_200 PASSED        [ 13%]
+tests/test_api.py::TestRootEndpoint::test_root_has_endpoints_key PASSED  [ 17%]
+tests/test_api.py::TestSimulateEndpoint::test_simulate_defaults PASSED   [ 20%]
+tests/test_api.py::TestSimulateEndpoint::test_simulate_custom_params PASSED [ 24%]
+tests/test_api.py::TestSimulateEndpoint::test_simulate_invalid_params PASSED [ 27%]
+tests/test_api.py::TestSimulateEndpoint::test_simulate_returns_bot_ids PASSED [ 31%]
+tests/test_api.py::TestHistoryEndpoint::test_history_returns_200 PASSED  [ 34%]
+tests/test_api.py::TestHistoryEndpoint::test_history_returns_list PASSED [ 37%]
+tests/test_api.py::TestHistoryEndpoint::test_history_pagination PASSED   [ 41%]
+tests/test_api.py::TestHistoryEndpoint::test_history_invalid_limit PASSED [ 44%]
+tests/test_api.py::TestHistoryEndpoint::test_history_detail_404 PASSED   [ 48%]
+tests/test_api.py::TestJobStatusEndpoint::test_status_unknown_job PASSED [ 51%]
+tests/test_api.py::TestJobStatusEndpoint::test_status_after_simulate PASSED [ 55%]
+tests/test_api.py::TestDownloadEndpoint::test_download_nonexistent_file PASSED [ 58%]
+tests/test_api.py::TestDownloadEndpoint::test_download_path_traversal_blocked PASSED [ 62%]
+tests/test_processor.py::TestComputeFeatures::test_returns_all_nodes PASSED [ 65%]
+tests/test_processor.py::TestComputeFeatures::test_feature_keys PASSED   [ 68%]
+tests/test_processor.py::TestComputeFeatures::test_empty_graph PASSED    [ 72%]
+tests/test_processor.py::TestComputeFeatures::test_single_node PASSED    [ 75%]
+tests/test_processor.py::TestClassifyNodes::test_star_bot_detected PASSED [ 79%]
+tests/test_processor.py::TestClassifyNodes::test_star_bot_high_risk PASSED [ 82%]
+tests/test_processor.py::TestClassifyNodes::test_engagement_pod_detected PASSED [ 86%]
+tests/test_processor.py::TestClassifyNodes::test_influencer_detected FAILED [ 89%]
+tests/test_processor.py::TestClassifyNodes::test_organic_not_flagged PASSED [ 93%]
+tests/test_processor.py::TestClassifyNodes::test_empty_features_returns_empty PASSED [ 96%]
+tests/test_processor.py::TestClassifyNodes::test_risk_score_bounded PASSED [100%]
+
+================================== FAILURES ===================================
+_________________ TestClassifyNodes.test_influencer_detected __________________
+
+self = <test_processor.TestClassifyNodes object at 0x000001914F1EB100>
+
+    def test_influencer_detected(self):
+        G, celeb = _build_influencer_graph(followers=200)
+        features = compute_features(G)
+        results  = classify_nodes(features, k_threshold=10)
+>       assert results[celeb]["label"] == "influencer", (
+            f"Influencer not detected ù got {results[celeb]['label']} "
+            f"(in={results[celeb]['in_deg']}, out={results[celeb]['out_deg']})"
+        )
+E       AssertionError: Influencer not detected ù got bot (in=200, out=5)
+E       assert 'bot' == 'influencer'
+E         
+E         - influencer
+E         + bot
+
+tests\test_processor.py:144: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_processor.py::TestClassifyNodes::test_influencer_detected
+======================== 1 failed, 28 passed in 8.12s =========================

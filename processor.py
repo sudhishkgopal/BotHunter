@@ -13,7 +13,9 @@ Pipeline:
 import argparse
 import json
 import logging
+import os
 from datetime import datetime, timezone
+from typing import Optional
 
 import networkx as nx
 
@@ -26,6 +28,34 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+def _load_config() -> dict:
+    """Load config.json once at import time."""
+    path = os.path.join(os.path.dirname(__file__), "config.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+
+_CFG = _load_config()
+_WEIGHTS = _CFG.get("scoring_weights", {})
+_CLASS = _CFG.get("classification", {})
+
+# Scoring weights (config-driven with sensible defaults)
+W_ASYMMETRY: float = _WEIGHTS.get("asymmetry", 0.40)
+W_CLUSTERING: float = _WEIGHTS.get("clustering_inverse", 0.35)
+W_KCORE: float = _WEIGHTS.get("k_core_density", 0.25)
+
+# Classification thresholds (config-driven with sensible defaults)
+THR_BOT_OUT_IN_RATIO: float = _CLASS.get("bot_out_in_ratio", 5)
+THR_BOT_CLUST_MAX: float = _CLASS.get("bot_clustering_max", 0.2)
+THR_BOT_RISK_MIN: float = _CLASS.get("bot_risk_min", 0.7)
+THR_BOT_RISK_CLUST_MAX: float = _CLASS.get("bot_risk_clustering_max", 0.3)
+THR_POD_CLUST_MIN: float = _CLASS.get("pod_clustering_min", 0.6)
+THR_INF_IN_OUT_RATIO: float = _CLASS.get("influencer_in_out_ratio", 3)
+THR_INF_MIN_IN: int = _CLASS.get("influencer_min_in_degree", 50)
 
 # Creating graph from database
 # Using a directed graph to mimic social media relationships (person A follows person B != person B follows person A)
@@ -126,81 +156,66 @@ CLASSIFICATION_NORMAL = "normal"
 def classify_nodes(
     features: dict[int, dict],
     k_threshold: int,
-    ) -> dict[int, dict]:
+) -> dict[int, dict]:
     """
-    Assign a risk score (0.0 - 1.0) and a label to every node.
+    Assign a risk score (0.0 – 1.0) and a classification label to every node.
 
-    Scoring weights:
-      - Degree asymmetry  (0.40) — out/in ratio; bots skew heavily outward
-      - Clustering inverse (0.35) — low clustering in a high-degree node is suspicious
-      - K-core density    (0.25) — high core number indicates pod membership
+    Scoring weights and classification thresholds are loaded from config.json
+    at module import time so they can be tuned without touching source code.
 
-    The final label is decided by combining the score with feature context.
+    Scoring formula (weights sum to 1.0):
+      - Degree asymmetry    (W_ASYMMETRY)  — out/in ratio; bots skew outward
+      - Clustering inverse  (W_CLUSTERING) — low clustering on connected node = suspicious
+      - K-core density      (W_KCORE)      — high core number → pod membership
+
+    Label priority order:
+      1. engagement_pod  — dense mutual cluster
+      2. bot             — star bot or high risk + low clustering
+      3. influencer      — high in-degree, low out-degree
+      4. normal          — everything else
     """
     if not features:
         return {}
 
-    # Normalisation bounds to consider outliers
-    max_out = max((f["out_deg"] for f in features.values()), default=1) or 1 
-    max_in = max((f["in_deg"] for f in features.values()), default=1) or 1 
+    # Normalisation bounds handle outliers cleanly
+    max_out = max((f["out_deg"] for f in features.values()), default=1) or 1
+    max_in  = max((f["in_deg"]  for f in features.values()), default=1) or 1
     max_core = max((f["k_core"] for f in features.values()), default=1) or 1
 
     results: dict[int, dict] = {}
 
     for node, f in features.items():
-        in_deg = f["in_deg"]
+        in_deg  = f["in_deg"]
         out_deg = f["out_deg"]
-        clust = f["clustering"]
-        k_core = f["k_core"]
+        clust   = f["clustering"]
+        k_core  = f["k_core"]
 
-        # DEGREE ASYMMETRY 
-        # A balanced account scores ~0.  A star bot (out >> in) scores ~1.
-        # Formula: out_ratio - in_ratio, clamped to [0, 1]
+        # --- Degree asymmetry: balanced ≈ 0, star bot ≈ 1 ----------------
         out_ratio = out_deg / max_out
-        in_ratio = in_deg / max_in
-        asymmetry = max(0.0, min(1.0, out_ratio - in_ratio + 0.5)) #round up to give buffer for normal accounts
-        
+        in_ratio  = in_deg  / max_in
+        asymmetry = max(0.0, min(1.0, out_ratio - in_ratio + 0.5))
 
-        # CLUSTERING INVERSE
-        # High clustering -> low suspicion. Low clustering -> high suspicion.
-        # BUT only if the node has connections (isolated nodes get 0).
-        if in_deg + out_deg > 0:
-            clust_inv = 1.0 - clust
-        else:
-            clust_inv = 0.0
+        # --- Clustering inverse: suspicious when connected but isolated ----
+        clust_inv = (1.0 - clust) if (in_deg + out_deg > 0) else 0.0
 
-        # K-CORE DENSITY
+        # --- K-Core density -------------------------------------------------
         core_norm = k_core / max_core
 
-        # RISK SCORE
-        W_ASYMMETRY = 0.40
-        W_CLUSTERING = 0.35
-        W_KCORE = 0.25
-
+        # --- Weighted risk score (config-driven weights) --------------------
         risk = (
-            W_ASYMMETRY * asymmetry
+            W_ASYMMETRY  * asymmetry
             + W_CLUSTERING * clust_inv
-            + W_KCORE * core_norm
+            + W_KCORE      * core_norm
         )
 
-        # ASSIGN LABEL
-        # Scores consider suspicion level
-        # The feature context determines the type of suspect.
-
-        if k_core >= k_threshold and clust > 0.6:
-            # Dense mutual cluster + high clustering = engagement pod
+        # --- Label assignment (config-driven thresholds) --------------------
+        if k_core >= k_threshold and clust > THR_POD_CLUST_MIN:
             label = CLASSIFICATION_POD
-        elif out_deg > in_deg * 5 and clust < 0.2:
-            # Massive outgoing, almost no incoming, no clustering = star bot
+        elif out_deg > in_deg * THR_BOT_OUT_IN_RATIO and clust < THR_BOT_CLUST_MAX:
             label = CLASSIFICATION_BOT
-        elif risk > 0.7 and clust < 0.3:
-            # High risk + low clustering = likely bot (catches edge cases)
+        elif risk > THR_BOT_RISK_MIN and clust < THR_BOT_RISK_CLUST_MAX:
             label = CLASSIFICATION_BOT
-        elif in_deg > out_deg * 3 and in_deg >= 50 and clust < 0.3:
-            # High in-degree, low clustering = celebrity / influencer
-            label = CLASSIFICATION_INFLUENCER
-        elif in_deg > out_deg * 3 and in_deg >= 50 and clust >= 0.3:
-            # High in-degree WITH high clustering = authority in a community
+        elif in_deg > out_deg * THR_INF_IN_OUT_RATIO and in_deg >= THR_INF_MIN_IN:
             label = CLASSIFICATION_INFLUENCER
         else:
             label = CLASSIFICATION_NORMAL
@@ -208,7 +223,7 @@ def classify_nodes(
         results[node] = {
             "risk_score": round(risk, 4),
             "label": label,
-            **f,  # include raw features for transparency
+            **f,
         }
 
     return results

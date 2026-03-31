@@ -4,5 +4,39 @@
     "snap_dataset_url": "https://snap.stanford.edu/data/twitter_combined.txt.gz",
     "max_neighbors_viz": 50,
     "top_n_startup": 100,
-    "cache_ttl_seconds": 300
+    "cache_ttl_seconds": 300,
+
+    "_comment_scoring": "Weighted risk score formula: risk = W_ASYMMETRY*asymmetry + W_CLUSTERING*clust_inv + W_KCORE*core_norm",
+    "scoring_weights": {
+        "asymmetry": 0.40,
+        "clustering_inverse": 0.35,
+        "k_core_density": 0.25
+    },
+
+    "_comment_classification": "Label assignment rules — change thresholds here, not in processor.py",
+    "classification": {
+        "bot_out_in_ratio": 5,
+        "bot_clustering_max": 0.2,
+        "bot_risk_min": 0.7,
+        "bot_risk_clustering_max": 0.3,
+        "pod_clustering_min": 0.6,
+        "influencer_in_out_ratio": 3,
+        "influencer_min_in_degree": 50
+    },
+
+    "_comment_ai": "Set AI_PROVIDER and AI_API_KEY in your .env file. Supported: openai, gemini, anthropic, ollama",
+    "ai": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "enabled": false,
+        "max_explanation_tokens": 200
+    },
+
+    "_comment_api": "FastAPI server settings",
+    "api": {
+        "rate_limit_per_minute": 60,
+        "max_upload_size_mb": 50,
+        "job_ttl_seconds": 3600
+    }
 }
+

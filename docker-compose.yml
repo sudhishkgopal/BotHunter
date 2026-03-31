@@ -1,0 +1,58 @@
+services:
+  # ── Streamlit Dashboard ─────────────────────────────────────────────────
+  dashboard:
+    build: .
+    container_name: bothunter-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - DATABASE_URL=sqlite:////app/data/bothunter.db
+      - AI_PROVIDER=${AI_PROVIDER:-openai}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-gpt-4o-mini}
+      - AI_ENABLED=${AI_ENABLED:-false}
+      - APP_MODE=dashboard
+    volumes:
+      - bothunter_data:/app/data
+    command: >
+      python -m streamlit run app.py
+      --server.address=0.0.0.0
+      --server.port=8501
+      --server.headless=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── FastAPI Backend ─────────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: bothunter-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////app/data/bothunter.db
+      - AI_PROVIDER=${AI_PROVIDER:-openai}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-gpt-4o-mini}
+      - AI_ENABLED=${AI_ENABLED:-false}
+      - APP_MODE=api
+    volumes:
+      - bothunter_data:/app/data
+    command: >
+      python -m uvicorn main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  bothunter_data:
+    driver: local

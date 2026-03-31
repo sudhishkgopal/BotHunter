@@ -1,17 +1,138 @@
-import networkx as nx
-import matplotlib.pyplot as plt
-import multiprocessing as mp
+"""
+BotHunter FastAPI Application
+
+Endpoints:
+  GET  /              — API info
+  GET  /health        — Health check
+  POST /simulate      — Run detection on a synthetic network
+  POST /analyze       — Upload edge-list file and run detection
+  GET  /twitter       — Run detection on bundled Twitter dataset
+  GET  /history       — List all past analysis runs (paginated)
+  GET  /history/{id}  — Single run detail including full bot ID list
+  GET  /status/{job_id} — Poll async job status
+  GET  /download/{filename} — Download generated files
+"""
+
+import asyncio
 import json
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
 import os
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
 
-# FASTAPI APP SETUP
+import matplotlib
+matplotlib.use("Agg")   # headless — no display needed on the server
 
-app = FastAPI(title="BotHunter API", description="Bot Detection using K-Core Algorithm")
+import matplotlib.pyplot as plt
+import networkx as nx
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 
-# Enable CORS for frontend access
+import multiprocessing as mp
+
+from database import SessionLocal, init_db
+from models import AnalysisResult
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+
+def _load_config() -> dict:
+    path = os.path.join(os.path.dirname(__file__), "config.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+_CFG = _load_config()
+_API_CFG = _CFG.get("api", {})
+MAX_UPLOAD_MB: int = _API_CFG.get("max_upload_size_mb", 50)
+JOB_TTL: int = _API_CFG.get("job_ttl_seconds", 3600)
+
+# ─── In-memory async job store ────────────────────────────────────────────────
+# Keys: job_id (str) → {"status": "pending"|"running"|"done"|"error",
+#                        "result": dict | None, "error": str | None,
+#                        "created_at": datetime}
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = asyncio.Lock()
+
+# ─── Pydantic schemas ─────────────────────────────────────────────────────────
+
+class SimulateRequest(BaseModel):
+    num_humans: int = Field(100, ge=10, le=10_000, description="Number of human nodes")
+    num_bots: int   = Field(15,  ge=2,  le=1_000,  description="Number of bot nodes in the clique")
+    k: int          = Field(10,  ge=2,  le=100,    description="K-Core threshold")
+
+class SimulateResponse(BaseModel):
+    status: str
+    job_id: str
+    total_nodes: int
+    total_edges: int
+    detected_bots: int
+    bot_ids: list[int]
+    visualization: Optional[str] = None
+    results_file: Optional[str] = None
+
+class AnalyzeResponse(BaseModel):
+    status: str
+    job_id: str
+    total_nodes: int
+    total_edges: int
+    detected_bots: int
+    bot_ids: list[int]
+    visualization: Optional[str] = None
+    results_file: Optional[str] = None
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str    # pending | running | done | error
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    created_at: str
+
+class HistoryItem(BaseModel):
+    id: int
+    run_label: Optional[str]
+    k_core_threshold: int
+    total_nodes: int
+    total_edges: int
+    bots_detected: int
+    detection_accuracy: Optional[float]
+    ran_at: str
+
+class HistoryDetail(HistoryItem):
+    bot_ids: list[int]
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    version: str
+    db_connected: bool
+    graph_engine: str
+
+# ─── App setup ────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="BotHunter API",
+    description=(
+        "Graph-based social media bot detection using K-Core Decomposition.\n\n"
+        "Detects three bot patterns:\n"
+        "- **Star Bots** — mass-following accounts with negligible followers\n"
+        "- **Engagement Pods** — mutual-follow cliques inflating engagement\n"
+        "- **Influencers** — high in-degree accounts (not bots, but flagged)\n\n"
+        "Powered by a multi-signal risk score: degree asymmetry + clustering coefficient inverse + K-Core density."
+    ),
+    version="1.0.0",
+    contact={"name": "BotHunter", "url": "https://github.com/sudhishkg11/BotHunter"},
+    openapi_tags=[
+        {"name": "Detection",  "description": "Run bot detection on real or simulated networks"},
+        {"name": "History",    "description": "Query past analysis runs stored in the database"},
+        {"name": "Jobs",       "description": "Poll the status of async detection jobs"},
+        {"name": "Files",      "description": "Download generated visualizations and result files"},
+        {"name": "System",     "description": "Health and metadata endpoints"},
+    ],
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,316 +142,346 @@ app.add_middleware(
 )
 
 
-# FUNCTION DEFINITIONS
+# ─── Algorithm helpers ────────────────────────────────────────────────────────
 
-def get_k_core(graph, k):
-    """LOGIC: The K-Core Pruning Function"""
-    # Convert to a dictionary adjacency list for speed O(1) lookup time
+def get_k_core(graph: nx.Graph, k: int) -> nx.Graph:
+    """Iterative K-Core pruning — O(n+m) per round."""
     adj = {node: set(neighbors) for node, neighbors in graph.adjacency()}
-    
     while True:
-        # Find nodes that have fewer than K neighbors
-        to_remove = [node for node, neighbors in adj.items() if len(neighbors) < k]
-        
+        to_remove = [n for n, nbrs in adj.items() if len(nbrs) < k]
         if not to_remove:
-            break 
-            
-        for node in to_remove:
-            # Remove this node from its neighbors' adjacency lists
-            for neighbor in adj[node]:
-                adj[neighbor].remove(node)
-            # Remove the node itself
-            del adj[node]
-            
-    return nx.Graph(adj)  # Convert back to NetworkX for visualization
-
-
-def find_nodes_to_remove(node_chunk, adj_dictionary, k):
-    """Looks at a chunk of nodes at a time and finds which ones have <k connections"""
-    return [node for node in node_chunk if len(adj_dictionary[node]) < k]
-
-
-def get_k_core_parallel(graph, k):
-    """Parallel K-Core implementation for large graphs"""
-    # Convert to a dictionary adjacency list for speed O(1) lookup time
-    adj = {node: set(neighbors) for node, neighbors in graph.adjacency()}
-    nodes = list(adj.keys())
-    num_cores = mp.cpu_count()  # Gets number of CPU cores available
-    
-    while True:
-        # Split the nodes into chunks so each core processes a chunk, resulting in faster processing
-        chunk_size = len(nodes) // num_cores  # Find chunk size
-        # Start at index i and go up to i + chunk_size
-        chunks = [nodes[i:i + chunk_size] for i in range(0, len(nodes), chunk_size)]
-        # Chunk 1: nodes[0,chunk_size], Chunk 2: nodes[chunk_size+1, 2*chunk_size], etc.
-
-        # Now parallel the processing
-        with mp.Pool(processes=num_cores) as pool:
-            # Each core processes its designated chunk
-            results = pool.starmap(find_nodes_to_remove, [(chunk, adj, k) for chunk in chunks])
-        
-        # Project the list of lists into a single list of suspected bots
-        nodes_to_remove = [node for sublist in results for node in sublist]
-
-        # if there are no suspected bots return early, otherwise continue
-        if not nodes_to_remove:
             break
-
-        for node in nodes_to_remove:  # Loop through each suspected bot
-            if node in adj:  # Check if node exists, it could have already been removed by another neighbor
-                for neighbor in adj[node]:  # Tell neighbors to remove node from their adj list
-                    if node in adj[neighbor]:   
-                        adj[neighbor].remove(node)
-                del adj[node]  # Once neighbors have deleted the node, delete the node itself
-
-        nodes = list(adj.keys())  # Update remaining nodes
-        print("Nodes remaining:", len(nodes))
-        
-    return nx.Graph(adj)  # Convert back to NetworkX for visualization
+        for node in to_remove:
+            for nbr in adj[node]:
+                adj[nbr].discard(node)
+            del adj[node]
+    return nx.Graph(adj)
 
 
-def save_visualization(original_G, core_G, filename="bot_detection.png"):
-    """Save visualization to file instead of showing"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10), facecolor='#F5F5F5')
-    
-    # Use 'Spring Layout' to position nodes further apart to see the "structure"
+def _find_nodes_to_remove(chunk: list, adj: dict, k: int) -> list:
+    return [n for n in chunk if len(adj[n]) < k]
+
+
+def get_k_core_parallel(graph: nx.Graph, k: int) -> nx.Graph:
+    """Parallel K-Core using a Master-Worker pool for large graphs."""
+    adj = {node: set(neighbors) for node, neighbors in graph.adjacency()}
+    num_cores = mp.cpu_count()
+    while True:
+        nodes = list(adj.keys())
+        chunk_size = max(1, len(nodes) // num_cores)
+        chunks = [nodes[i:i + chunk_size] for i in range(0, len(nodes), chunk_size)]
+        with mp.Pool(processes=num_cores) as pool:
+            results = pool.starmap(_find_nodes_to_remove, [(c, adj, k) for c in chunks])
+        to_remove = [n for sub in results for n in sub]
+        if not to_remove:
+            break
+        for node in to_remove:
+            if node in adj:
+                for nbr in adj[node]:
+                    adj[nbr].discard(node)
+                del adj[node]
+    return nx.Graph(adj)
+
+
+def save_visualization(original_G: nx.Graph, core_G: nx.Graph, filename: str = "bot_detection.png") -> None:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10), facecolor="#F5F5F5")
     pos_orig = nx.spring_layout(original_G, k=0.15, iterations=50, seed=42)
     pos_core = nx.shell_layout(core_G) if len(core_G.nodes()) > 0 else {}
-    
-    # Draw Original Network
-    nx.draw_networkx_nodes(original_G, pos_orig, node_size=25, 
-                           node_color='#3498db', alpha=0.8, ax=ax1)
-    nx.draw_networkx_edges(original_G, pos_orig, width=0.5, 
-                           edge_color='grey', alpha=0.2, ax=ax1)  # Low alpha = cleaner
-    ax1.set_title("Original Network: The Noise", fontsize=20, fontweight='bold')
-    ax1.axis('off')
-
-    # Draw Bot Clique
+    nx.draw_networkx_nodes(original_G, pos_orig, node_size=25, node_color="#3498db", alpha=0.8, ax=ax1)
+    nx.draw_networkx_edges(original_G, pos_orig, width=0.5, edge_color="grey", alpha=0.2, ax=ax1)
+    ax1.set_title("Original Network: The Noise", fontsize=20, fontweight="bold")
+    ax1.axis("off")
     if len(core_G.nodes()) > 0:
-        nx.draw_networkx_nodes(core_G, pos_core, node_size=150, 
-                               node_color='#e74c3c', edgecolors='black', ax=ax2)
-        nx.draw_networkx_edges(core_G, pos_core, width=1.5, 
-                               edge_color='#c0392b', alpha=0.6, ax=ax2)
-    ax2.set_title("Detected Bot Core: The Signal", fontsize=20, fontweight='bold', color='#c0392b')
-    ax2.axis('off')
-
+        nx.draw_networkx_nodes(core_G, pos_core, node_size=150, node_color="#e74c3c", edgecolors="black", ax=ax2)
+        nx.draw_networkx_edges(core_G, pos_core, width=1.5, edge_color="#c0392b", alpha=0.6, ax=ax2)
+    ax2.set_title("Detected Bot Core: The Signal", fontsize=20, fontweight="bold", color="#c0392b")
+    ax2.axis("off")
     plt.tight_layout()
-    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.savefig(filename, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-def load_twitter_data(file_path):
-    """Load Twitter network data from file"""
-    print("Loading Twitter data from:", file_path)  # Loading Standford SNAP Dataset information by Jure Leskovec
-    print("Opening file")
-    # Using nx.read_edgelist to optimize space
-    # Twitter file uses spaces between IDs
-    twitter_graph = nx.read_edgelist(file_path, create_using=nx.Graph(), nodetype=int)
-    return twitter_graph
+def load_twitter_data(file_path: str) -> nx.Graph:
+    return nx.read_edgelist(file_path, create_using=nx.Graph(), nodetype=int)
 
 
-# API ENDPOINTS
+# ─── Job helpers ───────────────────────────────────────────────────────────────
 
-@app.get("/")
+def _make_job() -> str:
+    job_id = str(uuid.uuid4())
+    _JOBS[job_id] = {
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return job_id
+
+
+# ─── Endpoints ────────────────────────────────────────────────────────────────
+
+@app.get("/", tags=["System"])
 async def root():
-    """Root endpoint with API information"""
+    """API overview and available endpoints."""
     return {
         "message": "Welcome to BotHunter API",
-        "version": "1.0",
+        "version": "1.0.0",
+        "docs": "/docs",
         "endpoints": {
-            "/simulate": "POST - Run bot detection on simulated network",
-            "/analyze": "POST - Analyze uploaded network file",
-            "/twitter": "GET - Analyze Twitter dataset",
-            "/download/{filename}": "GET - Download generated files"
-        }
+            "POST /simulate":        "Run detection on a generated synthetic network",
+            "POST /analyze":         "Upload an edge-list file and run detection",
+            "GET  /twitter":         "Run detection on the bundled Twitter SNAP dataset",
+            "GET  /history":         "List past analysis runs (paginated)",
+            "GET  /history/{id}":    "Single run detail with full bot ID list",
+            "GET  /status/{job_id}": "Poll async job status",
+            "GET  /download/{file}": "Download a generated PNG or JSON file",
+        },
     }
 
 
-@app.post("/simulate")
-async def simulate_bot_detection(num_humans: int = 100, num_bots: int = 15, k: int = 10):
-    """
-    Run bot detection on a simulated network
-    
-    Parameters:
-    - num_humans: Number of human nodes (default: 100)
-    - num_bots: Number of bot nodes (default: 15)
-    - k: K-core threshold (default: 10)
-    """
+@app.get("/health", response_model=HealthResponse, tags=["System"])
+async def health_check():
+    """Health check: returns DB connectivity and service info."""
+    db_ok = False
     try:
-        # Generating crowd of humans and bots
-        # Create random humans and bots
-        human_network = nx.erdos_renyi_graph(num_humans, 0.05)  # Connected humans graph (each human has a 5% chance of connecting to another)
-        bot_network = nx.complete_graph(num_bots)  # Bot connections (all bots are connected)
-        # Assigning nodes to each ID, shifting over so bot IDs don't overlap with human IDs
-        bot_network = nx.relabel_nodes(bot_network, {i: i + num_humans for i in range(num_bots)})
-        human_network = nx.compose(human_network, bot_network)  # Merging humans and bots together
-        
-        # RUN bot detection
-        bot_core = get_k_core(human_network, k=k)
-        
-        # Save visualization
-        save_visualization(human_network, bot_core, "simulation_result.png")
-        
-        # Get results
+        with SessionLocal() as s:
+            s.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+    return HealthResponse(
+        status="healthy" if db_ok else "degraded",
+        service="BotHunter API",
+        version="1.0.0",
+        db_connected=db_ok,
+        graph_engine=f"NetworkX {nx.__version__}",
+    )
+
+
+@app.post("/simulate", response_model=SimulateResponse, tags=["Detection"])
+async def simulate_bot_detection(req: SimulateRequest):
+    """
+    Run bot detection on a procedurally-generated social network.
+
+    Creates `num_humans` random users and `num_bots` fully-connected bot nodes,
+    then runs K-Core pruning with threshold `k`.
+    """
+    job_id = _make_job()
+    try:
+        _JOBS[job_id]["status"] = "running"
+        human_network = nx.erdos_renyi_graph(req.num_humans, 0.05)
+        bot_network   = nx.complete_graph(req.num_bots)
+        bot_network   = nx.relabel_nodes(bot_network, {i: i + req.num_humans for i in range(req.num_bots)})
+        G             = nx.compose(human_network, bot_network)
+        bot_core      = get_k_core(G, k=req.k)
+        save_visualization(G, bot_core, "simulation_result.png")
         bot_list = list(bot_core.nodes())
-        
-        # Save to JSON
         with open("simulation_bots.json", "w") as f:
             json.dump(bot_list, f)
-        
-        return JSONResponse({
-            "status": "success",
-            "total_nodes": human_network.number_of_nodes(),
-            "total_edges": human_network.number_of_edges(),
-            "detected_bots": len(bot_list),
-            "bot_ids": bot_list,
-            "visualization": "/download/simulation_result.png",
-            "results_file": "/download/simulation_bots.json"
-        })
-        
+        result = SimulateResponse(
+            status="success",
+            job_id=job_id,
+            total_nodes=G.number_of_nodes(),
+            total_edges=G.number_of_edges(),
+            detected_bots=len(bot_list),
+            bot_ids=bot_list,
+            visualization="/download/simulation_result.png",
+            results_file="/download/simulation_bots.json",
+        )
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = result.model_dump()
+        return result
     except Exception as e:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"]  = str(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/analyze")
-async def analyze_network(file: UploadFile = File(...), k: int = 10, use_parallel: bool = False):
+@app.post("/analyze", response_model=AnalyzeResponse, tags=["Detection"])
+async def analyze_network(
+    file: UploadFile = File(..., description="Edge-list .txt file (space-separated node pairs)"),
+    k: int = Query(10, ge=2, le=100, description="K-Core threshold"),
+    use_parallel: bool = Query(False, description="Use parallel processing for large networks"),
+):
     """
-    Analyze an uploaded network file
-    
-    Parameters:
-    - file: Network edge list file (txt format)
-    - k: K-core threshold (default: 10)
-    - use_parallel: Use parallel processing for large networks (default: False)
+    Analyze an uploaded edge-list file.
+
+    File format: one edge per line, `<source_id> <target_id>` (space-separated integers).
+    Returns the detected bot IDs, a static visualization, and a downloadable JSON result.
     """
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
+
+    job_id = _make_job()
     try:
-        # Save uploaded file temporarily
+        _JOBS[job_id]["status"] = "running"
         temp_file = f"temp_{file.filename}"
         with open(temp_file, "wb") as f:
-            content = await file.read()
             f.write(content)
-        
-        # Load network
-        network = nx.read_edgelist(temp_file, create_using=nx.Graph(), nodetype=int)
-        
-        print(f"Loaded network with {network.number_of_nodes()} nodes and {network.number_of_edges()} edges")
-        
-        # Run bot detection
-        if use_parallel:
-            bot_core = get_k_core_parallel(network, k=k)
-        else:
-            bot_core = get_k_core(network, k=k)
-        
-        # Save visualization (skip for very large networks)
-        if network.number_of_nodes() < 5000:
+        network  = nx.read_edgelist(temp_file, create_using=nx.Graph(), nodetype=int)
+        bot_core = get_k_core_parallel(network, k=k) if use_parallel else get_k_core(network, k=k)
+        viz_path = "Skipped (network too large for static viz)"
+        if network.number_of_nodes() < 5_000:
             save_visualization(network, bot_core, "analysis_result.png")
             viz_path = "/download/analysis_result.png"
-        else:
-            viz_path = "Skipped (network too large for visualization)"
-        
-        # Get results
         bot_list = list(bot_core.nodes())
-        
-        # Save to JSON
         with open("detected_bots.json", "w") as f:
             json.dump(bot_list, f)
-        
-        # Clean up temp file
         os.remove(temp_file)
-        
-        return JSONResponse({
-            "status": "success",
-            "total_nodes": network.number_of_nodes(),
-            "total_edges": network.number_of_edges(),
-            "detected_bots": len(bot_list),
-            "bot_ids": bot_list[:100],  # Return first 100 for display
-            "visualization": viz_path,
-            "results_file": "/download/detected_bots.json"
-        })
-        
+        result = AnalyzeResponse(
+            status="success",
+            job_id=job_id,
+            total_nodes=network.number_of_nodes(),
+            total_edges=network.number_of_edges(),
+            detected_bots=len(bot_list),
+            bot_ids=bot_list[:100],
+            visualization=viz_path,
+            results_file="/download/detected_bots.json",
+        )
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = result.model_dump()
+        return result
     except Exception as e:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"]  = str(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/twitter")
-async def analyze_twitter(k: int = 10, use_parallel: bool = True):
-    """
-    Analyze Twitter dataset
-    
-    Parameters:
-    - k: K-core threshold (default: 10)
-    - use_parallel: Use parallel processing (default: True)
-    """
+@app.get("/twitter", tags=["Detection"])
+async def analyze_twitter(
+    k: int = Query(10, ge=2, le=100, description="K-Core threshold"),
+    use_parallel: bool = Query(True, description="Use parallel processing"),
+):
+    """Analyze the bundled Stanford SNAP Twitter dataset (81K nodes, 1.7M edges)."""
+    file_path = "twitter_combined.txt"
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Twitter dataset not found. Add twitter_combined.txt to the project directory.",
+        )
+    job_id = _make_job()
     try:
-        file_path = "twitter_combined.txt"  # File path for functional Twitter dataset
-        
-        # Check if file exists
-        if not os.path.exists(file_path):
-            raise HTTPException(
-                status_code=404, 
-                detail="Twitter dataset not found. Please add twitter_combined.txt to the project directory."
-            )
-        
-        # Load Twitter data
+        _JOBS[job_id]["status"] = "running"
         twitter_network = load_twitter_data(file_path)
-        
-        print(f"Successfully loaded {twitter_network.number_of_nodes()} users")
-        print(f"Successfully loaded {twitter_network.number_of_edges()} connections")
-        
-        # Run bot detection
-        if use_parallel:
-            bot_core = get_k_core_parallel(twitter_network, k=k)
-        else:
-            bot_core = get_k_core(twitter_network, k=k)
-        
-        # Get results
+        bot_core = get_k_core_parallel(twitter_network, k=k) if use_parallel else get_k_core(twitter_network, k=k)
         bot_list = list(bot_core.nodes())
-        
-        # Save to JSON
         with open("twitter_bots.json", "w") as f:
             json.dump(bot_list, f)
-        
-        print(f"Saved {len(bot_list)} bot IDs to twitter_bots.json")
-        
-        # Note: Skip visualization for very large networks to save time
-        if twitter_network.number_of_nodes() < 10000:
+        viz_path = "Skipped (network too large for static viz)"
+        if twitter_network.number_of_nodes() < 10_000:
             save_visualization(twitter_network, bot_core, "twitter_result.png")
             viz_path = "/download/twitter_result.png"
-        else:
-            viz_path = "Skipped (network too large for visualization)"
-        
-        return JSONResponse({
+        result = {
             "status": "success",
+            "job_id": job_id,
             "total_nodes": twitter_network.number_of_nodes(),
             "total_edges": twitter_network.number_of_edges(),
             "detected_bots": len(bot_list),
-            "bot_ids": bot_list[:100],  # Return first 100 for display
+            "bot_ids": bot_list[:100],
             "visualization": viz_path,
-            "results_file": "/download/twitter_bots.json"
-        })
-        
+            "results_file": "/download/twitter_bots.json",
+        }
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = result
+        return JSONResponse(result)
     except Exception as e:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"]  = str(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/download/{filename}")
+# ─── History endpoints ────────────────────────────────────────────────────────
+
+@app.get("/history", response_model=list[HistoryItem], tags=["History"])
+async def list_history(
+    limit: int  = Query(20, ge=1, le=200, description="Max results to return"),
+    offset: int = Query(0,  ge=0,         description="Pagination offset"),
+):
+    """
+    Return a paginated list of past bot detection runs, newest first.
+
+    Each item includes aggregate stats. Use `/history/{id}` to get the full bot ID list.
+    """
+    init_db()
+    with SessionLocal() as s:
+        rows = (
+            s.query(AnalysisResult)
+            .order_by(AnalysisResult.ran_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+    return [
+        HistoryItem(
+            id=r.id,
+            run_label=r.run_label,
+            k_core_threshold=r.k_core_threshold,
+            total_nodes=r.total_nodes,
+            total_edges=r.total_edges,
+            bots_detected=r.bots_detected,
+            detection_accuracy=r.detection_accuracy,
+            ran_at=r.ran_at.isoformat(),
+        )
+        for r in rows
+    ]
+
+
+@app.get("/history/{run_id}", response_model=HistoryDetail, tags=["History"])
+async def get_history_detail(run_id: int):
+    """Return a single past run including the full list of detected bot IDs."""
+    init_db()
+    with SessionLocal() as s:
+        row = s.query(AnalysisResult).filter(AnalysisResult.id == run_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return HistoryDetail(
+        id=row.id,
+        run_label=row.run_label,
+        k_core_threshold=row.k_core_threshold,
+        total_nodes=row.total_nodes,
+        total_edges=row.total_edges,
+        bots_detected=row.bots_detected,
+        detection_accuracy=row.detection_accuracy,
+        ran_at=row.ran_at.isoformat(),
+        bot_ids=json.loads(row.bot_ids_json) if row.bot_ids_json else [],
+    )
+
+
+# ─── Job status endpoint ──────────────────────────────────────────────────────
+
+@app.get("/status/{job_id}", response_model=JobStatusResponse, tags=["Jobs"])
+async def get_job_status(job_id: str):
+    """
+    Poll the status of an async detection job by its `job_id`.
+
+    Status values: `pending` → `running` → `done` | `error`
+    """
+    job = _JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    return JobStatusResponse(
+        job_id=job_id,
+        status=job["status"],
+        result=job.get("result"),
+        error=job.get("error"),
+        created_at=job["created_at"],
+    )
+
+
+# ─── File download ────────────────────────────────────────────────────────────
+
+@app.get("/download/{filename}", tags=["Files"])
 async def download_file(filename: str):
-    """
-    Download generated files (images, JSON results)
-    """
-    if not os.path.exists(filename):
+    """Download a generated file (PNG visualization or JSON results)."""
+    # Basic path-traversal guard
+    safe_name = os.path.basename(filename)
+    if not os.path.exists(safe_name):
         raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(filename, filename=filename)
+    return FileResponse(safe_name, filename=safe_name)
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "BotHunter API"}
-
-
-
-# MAIN EXECUTION (for testing without API)
+# ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn

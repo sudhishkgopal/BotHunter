@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: bothunter
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -e ".[deploy]"
+    startCommand: python -m streamlit run app.py --server.address=0.0.0.0 --server.port=10000 --server.headless=true
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///bothunter.db
+      - key: AI_ENABLED
+        value: "false"
+      - key: AI_PROVIDER
+        value: openai
+      - key: AI_API_KEY
+        sync: false    # Set this via the Render dashboard — never committed to git
+      - key: AI_MODEL
+        value: gpt-4o-mini
+      - key: PYTHON_VERSION
+        value: "3.12"
