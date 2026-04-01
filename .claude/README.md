@@ -3,7 +3,7 @@
 > **This file is the single source of truth for any AI assistant starting a new session.  
 > Read this file first. It is kept up-to-date after every meaningful code change.**
 
-Last updated: 2026-03-31
+Last updated: 2026-03-31 (packaging + tests)
 
 ---
 
@@ -53,22 +53,24 @@ Detection goes beyond raw K-Core: it layers three weighted signals into a risk s
 
 ```
 BotHunter/
+├── __init__.py       ← Package init — exposes __version__, usage docs, public API surface
 ├── app.py            ← Streamlit dashboard (4-tab layout: Overview, Detect, History, Export)
 ├── main.py           ← FastAPI app + K-Core algorithm + async job system
 ├── processor.py      ← Feature computation & classification engine (config-driven weights)
 ├── ingestor.py       ← Synthetic data generator for testing
 ├── models.py         ← SQLAlchemy ORM models (User, Relationship, AnalysisResult)
 ├── database.py       ← DB engine setup, respects DATABASE_URL env var
-├── cli.py            ← Typer CLI commands
+├── cli.py            ← Typer CLI — entry point: `bothunter audit`
 ├── ai_insights.py    ← LLM-powered node explanation (pluggable: OpenAI/Gemini/Claude/Ollama)
 ├── config.json       ← Runtime config: detection thresholds, scoring weights, AI, API settings
 ├── requirements.txt  ← Python dependencies (all runtime + test deps pinned)
-├── pyproject.toml    ← Python packaging config with optional dep groups [dev], [ai], [deploy]
+├── pyproject.toml    ← Canonical packaging config (see Packaging section below)
 ├── docker-compose.yml ← Multi-service Docker setup (dashboard :8501 + API :8000)
 ├── render.yaml       ← One-click Render.com cloud deploy config
 ├── DEPLOY.md         ← Deployment guide (local, Docker, Render)
 ├── .env.example      ← Environment variable template (AI keys, DATABASE_URL)
 ├── tests/
+│   ├── __init__.py       ← Empty — marks tests/ as a package for pytest package-mode
 │   ├── test_processor.py ← Unit tests for the detection engine
 │   └── test_api.py       ← Integration tests for FastAPI endpoints
 ├── bothunter.db      ← SQLite database (gitignored in production)
@@ -189,11 +191,54 @@ All scoring weights and classification thresholds are **config-driven** — tune
 
 ---
 
+## Packaging
+
+The project is a **flat-layout** Python package (all source modules at the repo root, no `bothunter/` subdirectory). `pyproject.toml` is the canonical config — `requirements.txt` exists for tooling that doesn't read `pyproject.toml`.
+
+### Run tests
+```bash
+pytest                      # all 51 tests
+pytest tests/test_processor.py  # unit tests only (no DB or network needed)
+pytest tests/test_ingestor.py   # ingestor tests (in-memory SQLite)
+pytest tests/test_api.py        # API integration tests
+pytest -v --tb=short        # verbose with compact tracebacks
+```
+
+### Install commands
+```bash
+pip install -e .              # editable install — core runtime only
+pip install -e ".[dev]"       # + pytest, pytest-asyncio, pytest-cov, ruff, mypy
+pip install -e ".[ai]"        # + openai, google-generativeai, anthropic
+pip install -e ".[gpu]"       # + cudf-cu12, cugraph-cu12 (CUDA 12 required)
+pip install -e ".[deploy]"    # + gunicorn, psycopg2-binary
+```
+
+### Optional dep groups
+| Group | Purpose |
+|-------|---------|
+| `dev` | Testing (pytest, pytest-asyncio, pytest-cov, httpx), linting (ruff), types (mypy) |
+| `ai` | LLM provider SDKs for `ai_insights.py` (OpenAI, Gemini, Anthropic) |
+| `gpu` | CUDA-accelerated graph computation via cuGraph (requires NVIDIA GPU + CUDA 12) |
+| `deploy` | Production WSGI server (gunicorn) + PostgreSQL driver (psycopg2) |
+
+### Entry point
+After `pip install -e .`, the `bothunter` CLI is available on PATH:
+```bash
+bothunter audit --threshold 20 --top 15
+```
+This resolves to `cli:app` (the Typer application object in `cli.py`).
+
+### Setuptools flat-layout note
+`[tool.setuptools] py-modules` explicitly lists every installable module. Without this, `pip install` would not package the top-level `.py` files and the `bothunter` entry point script would fail with `ModuleNotFoundError`.
+
+---
+
 ## How to Run Locally
 
 ```bash
 # 1. Install dependencies
-pip install -r requirements.txt
+pip install -e ".[dev]"  # preferred (installs as editable + dev tools)
+# or: pip install -r requirements.txt
 
 # 2. Initialize the database
 python database.py
@@ -242,7 +287,13 @@ The image uses a **multi-stage build** (builder → runtime), runs as a **non-ro
 | **`render.yaml`** | New — one-click Render.com deploy |
 | **`DEPLOY.md`** | New — deployment guide for local, Docker, and Render |
 | **`requirements.txt`** | Fixed — added all missing deps: `matplotlib`, `plotly`, `pandas`, `streamlit`, `pyvis`, `pydantic`, `python-multipart`, `pytest`, `pytest-asyncio`, `httpx` |
-| **`tests/`** | New — `test_processor.py` (unit) and `test_api.py` (integration) |
+| **`pyproject.toml`** | Completed — added author, `pydantic`, `[gpu]` group, `mypy`, `[tool.setuptools]` flat-layout config, `[tool.mypy]` config |
+| **`__init__.py`** | New — root package init with `__version__`, `__author__`, usage docs |
+| **`tests/__init__.py`** | New — empty marker so pytest package-mode discovers tests correctly |
+| **`tests/conftest.py`** | New — shared fixtures: `small_graph`, `graph_features`, `db_session`, `seeded_db_session` |
+| **`tests/test_processor.py`** | Rewritten — 18 tests across `TestBuildGraph`, `TestComputeFeatures`, `TestClassifyNodes` |
+| **`tests/test_ingestor.py`** | New — 11 tests across `TestCreateHumans`, `TestCreateEngagementPod`, `TestCreateStarBot` |
+| **`tests/test_api.py`** | Existing — 18 integration tests for FastAPI endpoints |
 
 ---
 

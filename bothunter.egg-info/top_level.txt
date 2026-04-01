@@ -1,0 +1,8 @@
+ai_insights
+app
+cli
+database
+ingestor
+main
+models
+processor
