@@ -3,7 +3,7 @@
 > **This file is the single source of truth for any AI assistant starting a new session.  
 > Read this file first. It is kept up-to-date after every meaningful code change.**
 
-Last updated: 2026-03-29
+Last updated: 2026-03-31
 
 ---
 
@@ -53,17 +53,24 @@ Detection goes beyond raw K-Core: it layers three weighted signals into a risk s
 
 ```
 BotHunter/
-├── app.py            ← Streamlit dashboard (main UI, ~423 lines)
-├── main.py           ← FastAPI app + K-Core algorithm functions
-├── processor.py      ← Feature computation & classification engine
+├── app.py            ← Streamlit dashboard (4-tab layout: Overview, Detect, History, Export)
+├── main.py           ← FastAPI app + K-Core algorithm + async job system
+├── processor.py      ← Feature computation & classification engine (config-driven weights)
 ├── ingestor.py       ← Synthetic data generator for testing
 ├── models.py         ← SQLAlchemy ORM models (User, Relationship, AnalysisResult)
 ├── database.py       ← DB engine setup, respects DATABASE_URL env var
 ├── cli.py            ← Typer CLI commands
-├── config.json       ← Runtime config (k_core_threshold, max_neighbors_viz, etc.)
-├── requirements.txt  ← Python dependencies
-├── Dockerfile        ← Multi-stage Docker image (builder + runtime, non-root)
-├── setup.sh          ← Shell setup script
+├── ai_insights.py    ← LLM-powered node explanation (pluggable: OpenAI/Gemini/Claude/Ollama)
+├── config.json       ← Runtime config: detection thresholds, scoring weights, AI, API settings
+├── requirements.txt  ← Python dependencies (all runtime + test deps pinned)
+├── pyproject.toml    ← Python packaging config with optional dep groups [dev], [ai], [deploy]
+├── docker-compose.yml ← Multi-service Docker setup (dashboard :8501 + API :8000)
+├── render.yaml       ← One-click Render.com cloud deploy config
+├── DEPLOY.md         ← Deployment guide (local, Docker, Render)
+├── .env.example      ← Environment variable template (AI keys, DATABASE_URL)
+├── tests/
+│   ├── test_processor.py ← Unit tests for the detection engine
+│   └── test_api.py       ← Integration tests for FastAPI endpoints
 ├── bothunter.db      ← SQLite database (gitignored in production)
 ├── twitter_combined.txt ← Stanford SNAP Twitter dataset (81K nodes, 1.7M edges)
 └── .claude/
@@ -112,24 +119,27 @@ Each detection run is persisted with: `k_core_threshold`, `total_nodes`, `total_
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | API info / endpoint listing |
-| `POST` | `/simulate` | Run bot detection on a generated synthetic network |
-| `POST` | `/analyze` | Upload a `.txt` edge list file and run detection |
+| `POST` | `/simulate` | Run bot detection on a generated synthetic network (async, returns `job_id`) |
+| `POST` | `/analyze` | Upload a `.txt` edge list file and run detection (async, returns `job_id`) |
 | `GET` | `/twitter` | Run detection on the bundled Twitter SNAP dataset |
+| `GET` | `/status/{job_id}` | Poll async job status (`pending` / `running` / `done` / `error`) |
+| `GET` | `/history` | List all past analysis runs (paginated) |
+| `GET` | `/history/{id}` | Single run detail including full bot ID list |
 | `GET` | `/download/{filename}` | Serve generated PNG or JSON result files |
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Health check (includes DB connectivity + graph engine version) |
 
 ---
 
 ## Streamlit Dashboard (app.py)
 
-The dashboard is **batch-loaded** — it loads only the top-N suspects at startup (configurable) for fast rendering.
+The dashboard is **batch-loaded** — it loads only the top-N suspects at startup (configurable) for fast rendering. Organized into **4 tabs**:
 
-**Sections:**
-1. **Sidebar** — sliders for K-Core threshold, max neighbours in viz, startup batch size; influencer filter toggle; manual node selector
-2. **Metrics bar** — Total Nodes, Bots Identified, Network Density
-3. **High-Risk Accounts table** — Clickable `st.dataframe` with row selection; selecting a row focuses the graph on that node
-4. **Pyvis Local Neighbourhood** — Interactive directed graph of the selected node's 1-hop neighbourhood, coloured by classification label
-5. **Risk Score Histogram** — Plotly histogram of all flagged node scores, coloured by label
+- **Overview** — project explainer, live network stats
+- **Detect** — suspect table + Pyvis graph drill-down (click a row to focus the graph on that node)
+- **History** — past analysis runs with delta comparisons
+- **Export** — CSV / JSON download of flagged accounts
+
+**Sidebar controls:** K-Core threshold slider, max neighbours in viz, startup batch size, influencer filter toggle, manual node selector.
 
 ---
 
@@ -155,11 +165,27 @@ Run with: `python ingestor.py` (or with `--humans`, `--pod-size`, etc. flags)
   "max_neighbors_viz": 50,
   "top_n_startup": 100,
   "cache_ttl_seconds": 300,
-  "database_path": "bothunter.db"
+  "database_path": "bothunter.db",
+  "scoring_weights": {
+    "asymmetry": 0.40,
+    "clustering_inverse": 0.35,
+    "k_core_density": 0.25
+  },
+  "classification": {
+    "bot_out_in_ratio": 5,
+    "bot_clustering_max": 0.2,
+    "bot_risk_min": 0.7,
+    "bot_risk_clustering_max": 0.3,
+    "pod_clustering_min": 0.6,
+    "influencer_in_out_ratio": 3,
+    "influencer_min_in_degree": 50
+  },
+  "ai": { "provider": "openai", "model": "gpt-4o-mini", "enabled": false },
+  "api": { "rate_limit_per_minute": 60, "max_upload_size_mb": 50, "job_ttl_seconds": 3600 }
 }
 ```
 
-The database path is also overridable via `DATABASE_URL` environment variable (full SQLAlchemy connection string, e.g. for PostgreSQL).
+All scoring weights and classification thresholds are **config-driven** — tune detection sensitivity by editing `config.json`, not source code. The database path is also overridable via `DATABASE_URL` environment variable (full SQLAlchemy connection string, e.g. for PostgreSQL).
 
 ---
 
@@ -202,36 +228,40 @@ The image uses a **multi-stage build** (builder → runtime), runs as a **non-ro
 
 ---
 
-## Planned Enhancements (see implementation_plan.md)
+## Recent Changes (not yet committed)
 
-The following improvements are planned but not yet implemented:
-
-| Phase | Status | Summary |
-|-------|--------|---------|
-| **1 — Architecture refactor** | ⬜ Planned | Reorganize into `core/`, `api/`, `dashboard/`, `data/` packages; `pyproject.toml` |
-| **2 — FastAPI overhaul** | ⬜ Planned | Async job polling, history endpoint, Pydantic schemas, rate limiting |
-| **3 — Dashboard upgrades** | ⬜ Planned | 4 tabs (Overview, Detect, History, Export), CSV export, delta metrics |
-| **4 — AI / Real-time** | ⬜ Planned | LLM-powered node explanation hook, streaming ingestion endpoint |
-| **5 — Cloud deployment** | ⬜ Planned | `docker-compose.yml`, `render.yaml`, `railway.json`, `DEPLOY.md` |
-| **6 — Testing & CI** | ⬜ Planned | `pytest` suite for classifier + API, GitHub Actions CI |
-
-When any of these phases are implemented, **update this file** to move items from Planned to Complete and update the File Map, endpoints table, or schema sections accordingly.
+| Area | What changed |
+|------|-------------|
+| **`processor.py`** | Scoring weights and classification thresholds moved out of source code into `config.json` — no magic numbers remain |
+| **`config.json`** | Added `scoring_weights`, `classification`, `ai`, and `api` sections |
+| **`app.py`** | Full redesign — single scrolling page replaced with 4-tab layout (Overview, Detect, History, Export); added `"normal"` to color/display maps |
+| **`main.py`** | Async job system, `/history` + `/status/{job_id}` endpoints, Pydantic schemas, improved health check |
+| **`ai_insights.py`** | New — pluggable LLM explanation module (OpenAI / Gemini / Claude / Ollama) |
+| **`pyproject.toml`** | New — proper packaging with optional dep groups `[dev]`, `[ai]`, `[deploy]` |
+| **`docker-compose.yml`** | New — runs dashboard + API as two services sharing a persistent volume |
+| **`render.yaml`** | New — one-click Render.com deploy |
+| **`DEPLOY.md`** | New — deployment guide for local, Docker, and Render |
+| **`requirements.txt`** | Fixed — added all missing deps: `matplotlib`, `plotly`, `pandas`, `streamlit`, `pyvis`, `pydantic`, `python-multipart`, `pytest`, `pytest-asyncio`, `httpx` |
+| **`tests/`** | New — `test_processor.py` (unit) and `test_api.py` (integration) |
 
 ---
 
-## Key Constants & Weights (currently hardcoded in processor.py)
+## Key Constants & Weights (config-driven via config.json)
 
 ```python
-W_ASYMMETRY = 0.40   # Degree asymmetry weight
-W_CLUSTERING = 0.35  # Clustering coefficient inverse weight
-W_KCORE = 0.25       # K-Core density weight
+# Loaded from config.json → "scoring_weights"
+W_ASYMMETRY  = 0.40   # Degree asymmetry weight
+W_CLUSTERING = 0.35   # Clustering coefficient inverse weight
+W_KCORE      = 0.25   # K-Core density weight
 
-# Classification thresholds
+# Loaded from config.json → "classification"
 BOT:             out_deg > in_deg * 5  AND  clustering < 0.2
                  OR risk > 0.7  AND  clustering < 0.3
 ENGAGEMENT_POD:  k_core >= k_threshold  AND  clustering > 0.6
 INFLUENCER:      in_deg > out_deg * 3   AND  in_deg >= 50
 ```
+
+To tune detection sensitivity, edit `config.json` — no source code changes needed.
 
 ---
 
