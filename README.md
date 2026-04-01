@@ -1,5 +1,7 @@
 # BotHunter
 
+[![CI](https://github.com/sudhishkg11/BotHunter/actions/workflows/ci.yml/badge.svg)](https://github.com/sudhishkg11/BotHunter/actions/workflows/ci.yml)
+
 A graph-based bot detection engine that identifies coordinated bot farms using K-Core Decomposition. The system recursively prunes low-connectivity nodes to reveal high-density clusters, built on a Master-Worker architecture for parallel processing of large-scale social networks.
 
 ## Purpose

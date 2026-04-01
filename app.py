@@ -13,8 +13,8 @@ import json
 import os
 import tempfile
 
-import pandas as pd
 import networkx as nx
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
@@ -23,7 +23,7 @@ from sqlalchemy import func, text
 
 from database import SessionLocal, init_db
 from models import AnalysisResult, Relationship, User
-from processor import compute_features, classify_nodes
+from processor import classify_nodes, compute_features
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 

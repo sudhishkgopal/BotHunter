@@ -3,17 +3,16 @@ BotHunter CLI — professional audit interface.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-
 from database import SessionLocal, init_db
-from models import AnalysisResult, Relationship, User
-from processor import build_graph, compute_features, classify_nodes
+from models import AnalysisResult, User
+from processor import build_graph, classify_nodes, compute_features
 
 app = typer.Typer(
     name="bothunter",
@@ -181,7 +180,7 @@ def audit(
             bots_detected=len(bot_ids),
             bot_ids_json=json.dumps(bot_ids),
             detection_accuracy=f1,
-            ran_at=datetime.now(timezone.utc),
+            ran_at=datetime.now(UTC),
         )
         session.add(record)
         session.commit()

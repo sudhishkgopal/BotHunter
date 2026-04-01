@@ -5,11 +5,15 @@ Uses httpx.AsyncClient to test the full request/response cycle
 without spinning up a real server.
 """
 
+import os
+import sys
+
 import pytest
-import sys, os
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+
 from main import app
 
 

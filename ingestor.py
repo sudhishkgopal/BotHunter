@@ -17,7 +17,7 @@ Generates three distinct network patterns for bot-detection testing:
 import argparse
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from database import SessionLocal, init_db
 from models import Relationship, User
@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 
 
 # Timestamp helpers 

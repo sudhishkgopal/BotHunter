@@ -8,11 +8,9 @@ Covers:
 """
 
 import networkx as nx
-import pytest
 
-from processor import build_graph, compute_features, classify_nodes
-from tests.conftest import POD_IDS, STAR_BOT_ID, HUMAN_IDS
-
+from processor import build_graph, classify_nodes, compute_features
+from tests.conftest import HUMAN_IDS, POD_IDS, STAR_BOT_ID
 
 # ─── Helpers (large graphs purpose-built for classification correctness) ──────
 

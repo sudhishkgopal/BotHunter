@@ -3,7 +3,7 @@
 > **This file is the single source of truth for any AI assistant starting a new session.  
 > Read this file first. It is kept up-to-date after every meaningful code change.**
 
-Last updated: 2026-03-31 (packaging + tests)
+Last updated: 2026-04-01 (CI)
 
 ---
 
@@ -69,10 +69,15 @@ BotHunter/
 ├── render.yaml       ← One-click Render.com cloud deploy config
 ├── DEPLOY.md         ← Deployment guide (local, Docker, Render)
 ├── .env.example      ← Environment variable template (AI keys, DATABASE_URL)
+├── .github/
+│   └── workflows/
+│       └── ci.yml        ← GitHub Actions CI (lint + test on push/PR to main)
 ├── tests/
 │   ├── __init__.py       ← Empty — marks tests/ as a package for pytest package-mode
-│   ├── test_processor.py ← Unit tests for the detection engine
-│   └── test_api.py       ← Integration tests for FastAPI endpoints
+│   ├── conftest.py       ← Shared fixtures (small_graph, graph_features, db_session, seeded_db_session)
+│   ├── test_processor.py ← Unit tests for the detection engine (18 tests)
+│   ├── test_ingestor.py  ← Unit tests for data generation (11 tests)
+│   └── test_api.py       ← Integration tests for FastAPI endpoints (18 tests)
 ├── bothunter.db      ← SQLite database (gitignored in production)
 ├── twitter_combined.txt ← Stanford SNAP Twitter dataset (81K nodes, 1.7M edges)
 └── .claude/
@@ -294,6 +299,10 @@ The image uses a **multi-stage build** (builder → runtime), runs as a **non-ro
 | **`tests/test_processor.py`** | Rewritten — 18 tests across `TestBuildGraph`, `TestComputeFeatures`, `TestClassifyNodes` |
 | **`tests/test_ingestor.py`** | New — 11 tests across `TestCreateHumans`, `TestCreateEngagementPod`, `TestCreateStarBot` |
 | **`tests/test_api.py`** | Existing — 18 integration tests for FastAPI endpoints |
+| **`.github/workflows/ci.yml`** | New — GitHub Actions CI: Python 3.12, `pip install -r requirements.txt`, ruff lint, pytest |
+| **`requirements.txt`** | Added `ruff>=0.4` to testing section |
+| **`pyproject.toml`** | Added `[tool.ruff] exclude = ["*.ipynb"]` and `[tool.ruff.lint.per-file-ignores]` for E501 in pre-existing files |
+| **`README.md`** | Added CI badge (top of file) |
 
 ---
 

@@ -5,18 +5,16 @@ Each test uses an in-memory SQLite session (db_session fixture from conftest)
 so the real bothunter.db is never touched and tests never share state.
 """
 
-import pytest
 
+from ingestor import create_engagement_pod, create_humans, create_star_bot
 from models import Relationship, User
-from ingestor import create_humans, create_engagement_pod, create_star_bot
-
 
 # ─── create_humans ────────────────────────────────────────────────────────────
 
 class TestCreateHumans:
     def test_create_humans_produces_correct_count(self, db_session):
         """Exactly `total` human User rows should be inserted, all is_bot=False."""
-        humans = create_humans(db_session, total=10, group_count=2)
+        create_humans(db_session, total=10, group_count=2)
         db_session.flush()
 
         users = db_session.query(User).all()
@@ -58,14 +56,14 @@ class TestCreateHumans:
 
 class TestCreateEngagementPod:
     def test_engagement_pod_creates_correct_user_count(self, db_session):
-        pod = create_engagement_pod(db_session, pod_size=5)
+        create_engagement_pod(db_session, pod_size=5)
         db_session.flush()
 
         users = db_session.query(User).all()
         assert len(users) == 5
 
     def test_engagement_pod_users_are_flagged_as_bots(self, db_session):
-        pod = create_engagement_pod(db_session, pod_size=6)
+        create_engagement_pod(db_session, pod_size=6)
         db_session.flush()
 
         users = db_session.query(User).all()

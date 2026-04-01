@@ -14,8 +14,7 @@ import argparse
 import json
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import networkx as nx
 
@@ -304,7 +303,7 @@ def save_results(
         bots_detected=len(bot_ids),
         bot_ids_json=json.dumps(bot_ids),
         detection_accuracy=accuracy,
-        ran_at=datetime.now(timezone.utc),
+        ran_at=datetime.now(UTC),
     )
     session.add(record)
     session.commit()

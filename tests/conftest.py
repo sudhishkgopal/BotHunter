@@ -8,12 +8,12 @@ Fixtures:
   seeded_db_session — db_session pre-loaded with 3 users + 3 edges (2 follow, 1 like)
 """
 
-import pytest
 import networkx as nx
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, User, Relationship
+from models import Base, Relationship, User
 from processor import compute_features
 
 # ─── Node-ID layout for small_graph ──────────────────────────────────────────

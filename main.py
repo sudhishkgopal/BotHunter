@@ -17,11 +17,13 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import matplotlib
+
 matplotlib.use("Agg")   # headless — no display needed on the server
+
+import multiprocessing as mp
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -29,8 +31,6 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-
-import multiprocessing as mp
 
 from database import SessionLocal, init_db
 from models import AnalysisResult
@@ -70,8 +70,8 @@ class SimulateResponse(BaseModel):
     total_edges: int
     detected_bots: int
     bot_ids: list[int]
-    visualization: Optional[str] = None
-    results_file: Optional[str] = None
+    visualization: str | None = None
+    results_file: str | None = None
 
 class AnalyzeResponse(BaseModel):
     status: str
@@ -80,24 +80,24 @@ class AnalyzeResponse(BaseModel):
     total_edges: int
     detected_bots: int
     bot_ids: list[int]
-    visualization: Optional[str] = None
-    results_file: Optional[str] = None
+    visualization: str | None = None
+    results_file: str | None = None
 
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str    # pending | running | done | error
-    result: Optional[dict] = None
-    error: Optional[str] = None
+    result: dict | None = None
+    error: str | None = None
     created_at: str
 
 class HistoryItem(BaseModel):
     id: int
-    run_label: Optional[str]
+    run_label: str | None
     k_core_threshold: int
     total_nodes: int
     total_edges: int
     bots_detected: int
-    detection_accuracy: Optional[float]
+    detection_accuracy: float | None
     ran_at: str
 
 class HistoryDetail(HistoryItem):
@@ -213,7 +213,7 @@ def _make_job() -> str:
         "status": "pending",
         "result": None,
         "error": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     return job_id
 
