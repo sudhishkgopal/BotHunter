@@ -16,6 +16,7 @@ Endpoints:
 import asyncio
 import json
 import os
+import tempfile
 import uuid
 from datetime import UTC, datetime
 
@@ -281,17 +282,24 @@ def _run_simulate(job_id: str, num_humans: int, num_bots: int, k: int) -> None:
 def _run_analyze(
     job_id: str,
     content: bytes,
-    filename: str,
     k: int,
     use_parallel: bool,
 ) -> None:
-    """CPU-bound edge-list analysis — executed in a thread pool worker."""
-    temp_file = f"temp_{filename}"
+    """CPU-bound edge-list analysis — executed in a thread pool worker.
+
+    Uses ``tempfile.NamedTemporaryFile`` so concurrent requests never share
+    the same path.  ``delete=False`` is required on Windows because the OS
+    holds a lock on the file while it is open, preventing a second open() by
+    ``nx.read_edgelist``; the ``finally`` block handles deletion unconditionally.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        mode="wb", suffix=".txt", prefix="bh_analyze_", delete=False
+    )
     try:
         _JOBS[job_id]["status"] = "running"
-        with open(temp_file, "wb") as f:
-            f.write(content)
-        network  = nx.read_edgelist(temp_file, create_using=nx.Graph(), nodetype=int)
+        tmp.write(content)
+        tmp.close()   # flush & release OS lock before NetworkX opens it
+        network  = nx.read_edgelist(tmp.name, create_using=nx.Graph(), nodetype=int)
         bot_core = get_k_core_parallel(network, k=k) if use_parallel else get_k_core(network, k=k)
         viz_path = "Skipped (network too large for static viz)"
         if network.number_of_nodes() < 5_000:
@@ -315,8 +323,11 @@ def _run_analyze(
         _JOBS[job_id]["status"] = "error"
         _JOBS[job_id]["error"]  = str(exc)
     finally:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+        # Close in case we raised before the explicit tmp.close() above
+        if not tmp.closed:
+            tmp.close()
+        if os.path.exists(tmp.name):
+            os.remove(tmp.name)
 
 
 def _run_twitter(job_id: str, file_path: str, k: int, use_parallel: bool) -> None:
@@ -437,7 +448,6 @@ async def analyze_network(
         _run_analyze,
         job_id,
         content,
-        file.filename or "upload.txt",
         k,
         use_parallel,
     )

@@ -3,7 +3,7 @@
 > **This file is the single source of truth for any AI assistant starting a new session.  
 > Read this file first. It is kept up-to-date after every meaningful code change.**
 
-Last updated: 2026-04-15 (CORS security fix)
+Last updated: 2026-04-15 (temp file concurrency fix)
 
 ---
 
@@ -289,6 +289,7 @@ The image uses a **multi-stage build** (builder → runtime), runs as a **non-ro
 | **`main.py`** | **Async job system fully wired** — `/simulate`, `/analyze`, and `/twitter` now return `HTTP 202 + job_id` immediately; all CPU-bound graph work (`get_k_core`, matplotlib, file I/O) runs in a `ThreadPoolExecutor` via `loop.run_in_executor`. Added `_run_simulate`, `_run_analyze`, `_run_twitter` sync worker functions and `JobAcceptedResponse` Pydantic schema. Job state transitions: `pending → running → done/error`. Event loop is never blocked. |
 | **`main.py`** | **CORS security fix** — removed the invalid `allow_origins=["*"] + allow_credentials=True` combination (rejected by the CORS spec). Origins now read from the `CORS_ORIGINS` env var (comma-separated list), defaulting to `http://localhost:8501`. `allow_credentials` removed. Methods and headers tightened to `GET/POST` and `Content-Type/Authorization`. |
 | **`.env.example`** | Added `CORS_ORIGINS` entry with local-dev default, production guidance, and a multi-origin example. |
+| **`main.py`** | **Temp file concurrency fix** in `_run_analyze` — replaced `temp_{filename}` (shared, collision-prone) with `tempfile.NamedTemporaryFile(delete=False, prefix="bh_analyze_", suffix=".txt")`. File is written and explicitly closed before passing `tmp.name` to NetworkX (`delete=False` required on Windows due to OS-level file locking). `finally` block checks `tmp.closed` before closing and removes the file unconditionally on all exit paths. `filename` parameter removed from the worker signature and call site. |
 | **`ai_insights.py`** | New — pluggable LLM explanation module (OpenAI / Gemini / Claude / Ollama) |
 | **`pyproject.toml`** | New — proper packaging with optional dep groups `[dev]`, `[ai]`, `[deploy]` |
 | **`docker-compose.yml`** | New — runs dashboard + API as two services sharing a persistent volume |
