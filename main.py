@@ -27,6 +27,8 @@ import multiprocessing as mp
 
 import matplotlib.pyplot as plt
 import networkx as nx
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -56,12 +58,21 @@ JOB_TTL: int = _API_CFG.get("job_ttl_seconds", 3600)
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = asyncio.Lock()
 
+# Thread pool for CPU-bound graph work (keeps the event loop free)
+_EXECUTOR = ThreadPoolExecutor()
+
 # ─── Pydantic schemas ─────────────────────────────────────────────────────────
 
 class SimulateRequest(BaseModel):
     num_humans: int = Field(100, ge=10, le=10_000, description="Number of human nodes")
     num_bots: int   = Field(15,  ge=2,  le=1_000,  description="Number of bot nodes in the clique")
     k: int          = Field(10,  ge=2,  le=100,    description="K-Core threshold")
+
+class JobAcceptedResponse(BaseModel):
+    """Returned immediately (HTTP 202) when a job is queued."""
+    status: str = "pending"
+    job_id: str
+    poll_url: str
 
 class SimulateResponse(BaseModel):
     status: str
@@ -208,6 +219,7 @@ def load_twitter_data(file_path: str) -> nx.Graph:
 # ─── Job helpers ───────────────────────────────────────────────────────────────
 
 def _make_job() -> str:
+    """Register a new job in the store and return its id."""
     job_id = str(uuid.uuid4())
     _JOBS[job_id] = {
         "status": "pending",
@@ -216,6 +228,116 @@ def _make_job() -> str:
         "created_at": datetime.now(UTC).isoformat(),
     }
     return job_id
+
+
+def _job_accepted(job_id: str) -> JobAcceptedResponse:
+    """Build the immediate 202 response for a newly-queued job."""
+    return JobAcceptedResponse(
+        status="pending",
+        job_id=job_id,
+        poll_url=f"/status/{job_id}",
+    )
+
+
+# ─── Background workers (run in thread pool, never on the event loop) ─────────
+
+def _run_simulate(job_id: str, num_humans: int, num_bots: int, k: int) -> None:
+    """CPU-bound simulation — executed in a thread pool worker."""
+    try:
+        _JOBS[job_id]["status"] = "running"
+        human_network = nx.erdos_renyi_graph(num_humans, 0.05)
+        bot_network   = nx.complete_graph(num_bots)
+        bot_network   = nx.relabel_nodes(bot_network, {i: i + num_humans for i in range(num_bots)})
+        G             = nx.compose(human_network, bot_network)
+        bot_core      = get_k_core(G, k=k)
+        save_visualization(G, bot_core, "simulation_result.png")
+        bot_list = list(bot_core.nodes())
+        with open("simulation_bots.json", "w") as f:
+            json.dump(bot_list, f)
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = SimulateResponse(
+            status="success",
+            job_id=job_id,
+            total_nodes=G.number_of_nodes(),
+            total_edges=G.number_of_edges(),
+            detected_bots=len(bot_list),
+            bot_ids=bot_list,
+            visualization="/download/simulation_result.png",
+            results_file="/download/simulation_bots.json",
+        ).model_dump()
+    except Exception as exc:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"]  = str(exc)
+
+
+def _run_analyze(
+    job_id: str,
+    content: bytes,
+    filename: str,
+    k: int,
+    use_parallel: bool,
+) -> None:
+    """CPU-bound edge-list analysis — executed in a thread pool worker."""
+    temp_file = f"temp_{filename}"
+    try:
+        _JOBS[job_id]["status"] = "running"
+        with open(temp_file, "wb") as f:
+            f.write(content)
+        network  = nx.read_edgelist(temp_file, create_using=nx.Graph(), nodetype=int)
+        bot_core = get_k_core_parallel(network, k=k) if use_parallel else get_k_core(network, k=k)
+        viz_path = "Skipped (network too large for static viz)"
+        if network.number_of_nodes() < 5_000:
+            save_visualization(network, bot_core, "analysis_result.png")
+            viz_path = "/download/analysis_result.png"
+        bot_list = list(bot_core.nodes())
+        with open("detected_bots.json", "w") as f:
+            json.dump(bot_list, f)
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = AnalyzeResponse(
+            status="success",
+            job_id=job_id,
+            total_nodes=network.number_of_nodes(),
+            total_edges=network.number_of_edges(),
+            detected_bots=len(bot_list),
+            bot_ids=bot_list[:100],
+            visualization=viz_path,
+            results_file="/download/detected_bots.json",
+        ).model_dump()
+    except Exception as exc:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"]  = str(exc)
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+
+
+def _run_twitter(job_id: str, file_path: str, k: int, use_parallel: bool) -> None:
+    """CPU-bound Twitter dataset analysis — executed in a thread pool worker."""
+    try:
+        _JOBS[job_id]["status"] = "running"
+        twitter_network = load_twitter_data(file_path)
+        bot_core = get_k_core_parallel(twitter_network, k=k) if use_parallel else get_k_core(twitter_network, k=k)
+        bot_list = list(bot_core.nodes())
+        with open("twitter_bots.json", "w") as f:
+            json.dump(bot_list, f)
+        viz_path = "Skipped (network too large for static viz)"
+        if twitter_network.number_of_nodes() < 10_000:
+            save_visualization(twitter_network, bot_core, "twitter_result.png")
+            viz_path = "/download/twitter_result.png"
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = {
+            "status": "success",
+            "job_id": job_id,
+            "total_nodes": twitter_network.number_of_nodes(),
+            "total_edges": twitter_network.number_of_edges(),
+            "detected_bots": len(bot_list),
+            "bot_ids": bot_list[:100],
+            "visualization": viz_path,
+            "results_file": "/download/twitter_bots.json",
+        }
+    except Exception as exc:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"]  = str(exc)
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -258,102 +380,73 @@ async def health_check():
     )
 
 
-@app.post("/simulate", response_model=SimulateResponse, tags=["Detection"])
+@app.post("/simulate", response_model=JobAcceptedResponse, status_code=202, tags=["Detection"])
 async def simulate_bot_detection(req: SimulateRequest):
     """
-    Run bot detection on a procedurally-generated social network.
+    Queue bot detection on a procedurally-generated social network.
+
+    Returns HTTP 202 with a `job_id` immediately.  Poll `GET /status/{job_id}`
+    until `status` is `"done"` to retrieve the full result.
 
     Creates `num_humans` random users and `num_bots` fully-connected bot nodes,
     then runs K-Core pruning with threshold `k`.
     """
     job_id = _make_job()
-    try:
-        _JOBS[job_id]["status"] = "running"
-        human_network = nx.erdos_renyi_graph(req.num_humans, 0.05)
-        bot_network   = nx.complete_graph(req.num_bots)
-        bot_network   = nx.relabel_nodes(bot_network, {i: i + req.num_humans for i in range(req.num_bots)})
-        G             = nx.compose(human_network, bot_network)
-        bot_core      = get_k_core(G, k=req.k)
-        save_visualization(G, bot_core, "simulation_result.png")
-        bot_list = list(bot_core.nodes())
-        with open("simulation_bots.json", "w") as f:
-            json.dump(bot_list, f)
-        result = SimulateResponse(
-            status="success",
-            job_id=job_id,
-            total_nodes=G.number_of_nodes(),
-            total_edges=G.number_of_edges(),
-            detected_bots=len(bot_list),
-            bot_ids=bot_list,
-            visualization="/download/simulation_result.png",
-            results_file="/download/simulation_bots.json",
-        )
-        _JOBS[job_id]["status"] = "done"
-        _JOBS[job_id]["result"] = result.model_dump()
-        return result
-    except Exception as e:
-        _JOBS[job_id]["status"] = "error"
-        _JOBS[job_id]["error"]  = str(e)
-        raise HTTPException(status_code=500, detail=str(e))
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _EXECUTOR,
+        _run_simulate,
+        job_id,
+        req.num_humans,
+        req.num_bots,
+        req.k,
+    )
+    return _job_accepted(job_id)
 
 
-@app.post("/analyze", response_model=AnalyzeResponse, tags=["Detection"])
+@app.post("/analyze", response_model=JobAcceptedResponse, status_code=202, tags=["Detection"])
 async def analyze_network(
     file: UploadFile = File(..., description="Edge-list .txt file (space-separated node pairs)"),
     k: int = Query(10, ge=2, le=100, description="K-Core threshold"),
     use_parallel: bool = Query(False, description="Use parallel processing for large networks"),
 ):
     """
-    Analyze an uploaded edge-list file.
+    Queue analysis of an uploaded edge-list file.
+
+    Returns HTTP 202 with a `job_id` immediately.  Poll `GET /status/{job_id}`
+    until `status` is `"done"` to retrieve the full result.
 
     File format: one edge per line, `<source_id> <target_id>` (space-separated integers).
-    Returns the detected bot IDs, a static visualization, and a downloadable JSON result.
     """
     content = await file.read()
     if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
 
     job_id = _make_job()
-    try:
-        _JOBS[job_id]["status"] = "running"
-        temp_file = f"temp_{file.filename}"
-        with open(temp_file, "wb") as f:
-            f.write(content)
-        network  = nx.read_edgelist(temp_file, create_using=nx.Graph(), nodetype=int)
-        bot_core = get_k_core_parallel(network, k=k) if use_parallel else get_k_core(network, k=k)
-        viz_path = "Skipped (network too large for static viz)"
-        if network.number_of_nodes() < 5_000:
-            save_visualization(network, bot_core, "analysis_result.png")
-            viz_path = "/download/analysis_result.png"
-        bot_list = list(bot_core.nodes())
-        with open("detected_bots.json", "w") as f:
-            json.dump(bot_list, f)
-        os.remove(temp_file)
-        result = AnalyzeResponse(
-            status="success",
-            job_id=job_id,
-            total_nodes=network.number_of_nodes(),
-            total_edges=network.number_of_edges(),
-            detected_bots=len(bot_list),
-            bot_ids=bot_list[:100],
-            visualization=viz_path,
-            results_file="/download/detected_bots.json",
-        )
-        _JOBS[job_id]["status"] = "done"
-        _JOBS[job_id]["result"] = result.model_dump()
-        return result
-    except Exception as e:
-        _JOBS[job_id]["status"] = "error"
-        _JOBS[job_id]["error"]  = str(e)
-        raise HTTPException(status_code=500, detail=str(e))
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _EXECUTOR,
+        _run_analyze,
+        job_id,
+        content,
+        file.filename or "upload.txt",
+        k,
+        use_parallel,
+    )
+    return _job_accepted(job_id)
 
 
-@app.get("/twitter", tags=["Detection"])
+@app.get("/twitter", response_model=JobAcceptedResponse, status_code=202, tags=["Detection"])
 async def analyze_twitter(
     k: int = Query(10, ge=2, le=100, description="K-Core threshold"),
     use_parallel: bool = Query(True, description="Use parallel processing"),
 ):
-    """Analyze the bundled Stanford SNAP Twitter dataset (81K nodes, 1.7M edges)."""
+    """
+    Queue analysis of the bundled Stanford SNAP Twitter dataset (81K nodes, 1.7M edges).
+
+    Returns HTTP 202 with a `job_id` immediately.  Poll `GET /status/{job_id}`
+    until `status` is `"done"` to retrieve the full result.
+    """
     file_path = "twitter_combined.txt"
     if not os.path.exists(file_path):
         raise HTTPException(
@@ -361,34 +454,16 @@ async def analyze_twitter(
             detail="Twitter dataset not found. Add twitter_combined.txt to the project directory.",
         )
     job_id = _make_job()
-    try:
-        _JOBS[job_id]["status"] = "running"
-        twitter_network = load_twitter_data(file_path)
-        bot_core = get_k_core_parallel(twitter_network, k=k) if use_parallel else get_k_core(twitter_network, k=k)
-        bot_list = list(bot_core.nodes())
-        with open("twitter_bots.json", "w") as f:
-            json.dump(bot_list, f)
-        viz_path = "Skipped (network too large for static viz)"
-        if twitter_network.number_of_nodes() < 10_000:
-            save_visualization(twitter_network, bot_core, "twitter_result.png")
-            viz_path = "/download/twitter_result.png"
-        result = {
-            "status": "success",
-            "job_id": job_id,
-            "total_nodes": twitter_network.number_of_nodes(),
-            "total_edges": twitter_network.number_of_edges(),
-            "detected_bots": len(bot_list),
-            "bot_ids": bot_list[:100],
-            "visualization": viz_path,
-            "results_file": "/download/twitter_bots.json",
-        }
-        _JOBS[job_id]["status"] = "done"
-        _JOBS[job_id]["result"] = result
-        return JSONResponse(result)
-    except Exception as e:
-        _JOBS[job_id]["status"] = "error"
-        _JOBS[job_id]["error"]  = str(e)
-        raise HTTPException(status_code=500, detail=str(e))
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(
+        _EXECUTOR,
+        _run_twitter,
+        job_id,
+        file_path,
+        k,
+        use_parallel,
+    )
+    return _job_accepted(job_id)
 
 
 # ─── History endpoints ────────────────────────────────────────────────────────

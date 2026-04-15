@@ -3,7 +3,7 @@
 > **This file is the single source of truth for any AI assistant starting a new session.  
 > Read this file first. It is kept up-to-date after every meaningful code change.**
 
-Last updated: 2026-04-01 (CI)
+Last updated: 2026-04-15 (async job refactor)
 
 ---
 
@@ -126,10 +126,10 @@ Each detection run is persisted with: `k_core_threshold`, `total_nodes`, `total_
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | API info / endpoint listing |
-| `POST` | `/simulate` | Run bot detection on a generated synthetic network (async, returns `job_id`) |
-| `POST` | `/analyze` | Upload a `.txt` edge list file and run detection (async, returns `job_id`) |
-| `GET` | `/twitter` | Run detection on the bundled Twitter SNAP dataset |
-| `GET` | `/status/{job_id}` | Poll async job status (`pending` / `running` / `done` / `error`) |
+| `POST` | `/simulate` | Queue bot detection on a generated synthetic network — returns `202 + job_id` immediately |
+| `POST` | `/analyze` | Upload a `.txt` edge list file and queue detection — returns `202 + job_id` immediately |
+| `GET` | `/twitter` | Queue detection on the bundled Twitter SNAP dataset — returns `202 + job_id` immediately |
+| `GET` | `/status/{job_id}` | Poll async job status (`pending` → `running` → `done` \| `error`); `result` field populated when done |
 | `GET` | `/history` | List all past analysis runs (paginated) |
 | `GET` | `/history/{id}` | Single run detail including full bot ID list |
 | `GET` | `/download/{filename}` | Serve generated PNG or JSON result files |
@@ -285,7 +285,8 @@ The image uses a **multi-stage build** (builder → runtime), runs as a **non-ro
 | **`processor.py`** | Scoring weights and classification thresholds moved out of source code into `config.json` — no magic numbers remain |
 | **`config.json`** | Added `scoring_weights`, `classification`, `ai`, and `api` sections |
 | **`app.py`** | Full redesign — single scrolling page replaced with 4-tab layout (Overview, Detect, History, Export); added `"normal"` to color/display maps |
-| **`main.py`** | Async job system, `/history` + `/status/{job_id}` endpoints, Pydantic schemas, improved health check |
+| **`main.py`** | **Async job system fully wired** — `/simulate`, `/analyze`, and `/twitter` now return `HTTP 202 + job_id` immediately; all CPU-bound graph work (`get_k_core`, matplotlib, file I/O) runs in a `ThreadPoolExecutor` via `loop.run_in_executor`. Added `_run_simulate`, `_run_analyze`, `_run_twitter` sync worker functions and `JobAcceptedResponse` Pydantic schema. Job state transitions: `pending → running → done/error`. Event loop is never blocked. |
+| **`tests/test_api.py`** | Updated `TestSimulateEndpoint` — tests now assert `202` + `pending` on initial response and poll `GET /status/{job_id}` via new `_poll_done()` helper until `done` before asserting result fields. All 18 tests pass. |
 | **`ai_insights.py`** | New — pluggable LLM explanation module (OpenAI / Gemini / Claude / Ollama) |
 | **`pyproject.toml`** | New — proper packaging with optional dep groups `[dev]`, `[ai]`, `[deploy]` |
 | **`docker-compose.yml`** | New — runs dashboard + API as two services sharing a persistent volume |

@@ -5,6 +5,7 @@ Uses httpx.AsyncClient to test the full request/response cycle
 without spinning up a real server.
 """
 
+import asyncio
 import os
 import sys
 
@@ -15,6 +16,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from httpx import ASGITransport, AsyncClient
 
 from main import app
+
+
+async def _poll_done(client: AsyncClient, job_id: str, timeout: float = 30.0) -> dict:
+    """Poll /status/{job_id} until status is 'done' or 'error', then return the job payload."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        resp = await client.get(f"/status/{job_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["status"] in ("done", "error"):
+            return data
+        if asyncio.get_event_loop().time() > deadline:
+            raise TimeoutError(f"Job {job_id} did not finish within {timeout}s")
+        await asyncio.sleep(0.1)
 
 
 @pytest.fixture
@@ -53,23 +68,25 @@ class TestRootEndpoint:
 
 class TestSimulateEndpoint:
     async def test_simulate_defaults(self, client):
-        # Endpoint uses a Pydantic body — send empty JSON to use all defaults
+        # Endpoint now returns 202 immediately with a job_id
         resp = await client.post("/simulate", json={})
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
-        assert data["status"] == "success"
-        assert "detected_bots" in data
-        assert "total_nodes" in data
+        assert data["status"] == "pending"
         assert "job_id" in data
+        assert "poll_url" in data
 
     async def test_simulate_custom_params(self, client):
         resp = await client.post(
             "/simulate",
             json={"num_humans": 50, "num_bots": 10, "k": 5},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total_nodes"] == 60   # 50 humans + 10 bots
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        # Poll until done to verify result correctness
+        job = await _poll_done(client, job_id)
+        assert job["status"] == "done"
+        assert job["result"]["total_nodes"] == 60   # 50 humans + 10 bots
 
     async def test_simulate_invalid_params(self, client):
         # num_humans too small (< 10)
@@ -78,8 +95,13 @@ class TestSimulateEndpoint:
 
     async def test_simulate_returns_bot_ids(self, client):
         resp = await client.post("/simulate", json={"num_humans": 50, "num_bots": 8, "k": 5})
-        assert "bot_ids" in resp.json()
-        assert isinstance(resp.json()["bot_ids"], list)
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        job = await _poll_done(client, job_id)
+        assert job["status"] == "done"
+        result = job["result"]
+        assert "bot_ids" in result
+        assert isinstance(result["bot_ids"], list)
 
 
 class TestHistoryEndpoint:
