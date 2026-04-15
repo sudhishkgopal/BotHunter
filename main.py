@@ -51,6 +51,15 @@ _API_CFG = _CFG.get("api", {})
 MAX_UPLOAD_MB: int = _API_CFG.get("max_upload_size_mb", 50)
 JOB_TTL: int = _API_CFG.get("job_ttl_seconds", 3600)
 
+# ─── CORS origins ─────────────────────────────────────────────────────────────
+# Read a comma-separated list from the CORS_ORIGINS environment variable.
+# Default: the local Streamlit dashboard (http://localhost:8501).
+# In production set CORS_ORIGINS to the exact origin(s) of your frontend.
+# NOTE: allow_credentials=True is intentionally absent — the CORS spec forbids
+#       using credentials with a wildcard origin, and this API is stateless.
+_raw_origins = os.environ.get("CORS_ORIGINS", "http://localhost:8501")
+CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
 # ─── In-memory async job store ────────────────────────────────────────────────
 # Keys: job_id (str) → {"status": "pending"|"running"|"done"|"error",
 #                        "result": dict | None, "error": str | None,
@@ -146,10 +155,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
